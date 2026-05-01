@@ -7,3 +7,6 @@ build/
 dist/
 
 config/state.json
+config/config/
+config/build/
+config/logs/
