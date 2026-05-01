@@ -25,6 +25,10 @@ def run(command: list[str]) -> None:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Command failed")
 
 
+def sign_app() -> None:
+    run(["codesign", "--force", "--deep", "--sign", "-", str(APP_DIR)])
+
+
 def write_info_plist() -> None:
     plist_text = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -90,6 +94,7 @@ def build_app() -> Path:
     write_info_plist()
     copy_resources()
     EXECUTABLE_PATH.chmod(0o755)
+    sign_app()
     return APP_DIR
 
 

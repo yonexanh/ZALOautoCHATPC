@@ -55,9 +55,74 @@ private let _automationBootstrap: Void = {
     launchAutomationModeIfNeeded()
 }()
 
-private let _forceAutomationBootstrap = _automationBootstrap
+private let _forceAutomationBootstrap: Void = _automationBootstrap
 
 #endif
+
+enum ScheduleType: String, CaseIterable, Identifiable {
+    case daily
+    case once
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .daily:
+            return "Lặp lại hằng ngày"
+        case .once:
+            return "Gửi một lần"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .daily:
+            return "repeat"
+        case .once:
+            return "calendar"
+        }
+    }
+}
+
+struct SchedulerConfig: Codable {
+    var jobs: [ScheduleJob]
+}
+
+struct ScheduleJob: Identifiable, Codable, Equatable {
+    var id: String
+    var recipient: String
+    var message: String
+    var images: [String]
+    var schedule: JobSchedule
+
+    static func fresh() -> ScheduleJob {
+        ScheduleJob(
+            id: "job-\(Int(Date().timeIntervalSince1970))",
+            recipient: "",
+            message: "",
+            images: [],
+            schedule: JobSchedule(type: ScheduleType.daily.rawValue, at: "08:30", days: [0, 1, 2, 3, 4, 5, 6])
+        )
+    }
+}
+
+struct JobSchedule: Codable, Equatable {
+    var type: String
+    var at: String
+    var days: [Int]?
+}
+
+struct ValidationMessage: LocalizedError {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
+    }
+}
 
 @MainActor
 final class LauncherModel: ObservableObject {
@@ -74,6 +139,9 @@ final class LauncherModel: ObservableObject {
     @Published var accessibilityProcessName: String = "ZaloSchedulerLauncher"
     @Published var accessibilityExecutablePath: String = ""
     @Published var currentTask: String?
+    @Published var jobs: [ScheduleJob] = []
+    @Published var selectedJobID: String?
+    @Published var configSummary: String = "Đang đọc lịch gửi."
 
     private var schedulerProcess: Process?
     private let fileManager = FileManager.default
@@ -97,6 +165,7 @@ final class LauncherModel: ObservableObject {
         appendLog("Data root: \(dataRoot.path)")
         appendLog("Config mặc định: \(configPath)")
         appendLog("Python: \(pythonPath)")
+        loadConfigFromDisk()
         checkAccessibilityStatus()
     }
 
@@ -127,6 +196,9 @@ final class LauncherModel: ObservableObject {
     }
 
     func validateConfig() {
+        guard saveConfigFromForm() else {
+            return
+        }
         runOneShot(label: "Validate config", arguments: ["validate-config", "--config", configPath])
     }
 
@@ -158,6 +230,9 @@ final class LauncherModel: ObservableObject {
     func startScheduler() {
         guard schedulerProcess == nil else {
             appendLog("Scheduler đang chạy.")
+            return
+        }
+        guard saveConfigFromForm() else {
             return
         }
 
@@ -219,6 +294,156 @@ final class LauncherModel: ObservableObject {
         appendLog("Đã gửi tín hiệu dừng scheduler.")
     }
 
+    func loadConfigFromDisk() {
+        do {
+            let url = URL(fileURLWithPath: configPath)
+            let data = try Data(contentsOf: url)
+            let config = try JSONDecoder().decode(SchedulerConfig.self, from: data)
+            jobs = config.jobs.isEmpty ? [ScheduleJob.fresh()] : config.jobs
+            selectedJobID = jobs.first?.id
+            configSummary = "Đã đọc \(jobs.count) lịch gửi."
+        } catch {
+            let fallback = ScheduleJob.fresh()
+            jobs = [fallback]
+            selectedJobID = fallback.id
+            configSummary = "Không đọc được config. Đã tạo lịch trống để sửa lại."
+            appendLog("Không đọc được config: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func saveConfigFromForm() -> Bool {
+        do {
+            let cleanedJobs = try normalizedJobsForSaving()
+            let config = SchedulerConfig(jobs: cleanedJobs)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(config)
+            let url = URL(fileURLWithPath: configPath)
+            try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            jobs = cleanedJobs
+            if selectedJobID == nil {
+                selectedJobID = cleanedJobs.first?.id
+            }
+            configSummary = "Đã lưu \(cleanedJobs.count) lịch gửi."
+            appendLog("Đã lưu config: \(configPath)")
+            return true
+        } catch {
+            configSummary = error.localizedDescription
+            appendLog("Không lưu được config: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func addJob() {
+        var job = ScheduleJob.fresh()
+        var suffix = 1
+        while jobs.contains(where: { $0.id == job.id }) {
+            suffix += 1
+            job.id = "job-\(Int(Date().timeIntervalSince1970))-\(suffix)"
+        }
+        jobs.append(job)
+        selectedJobID = job.id
+        configSummary = "Đã thêm lịch mới."
+    }
+
+    func duplicateSelectedJob() {
+        guard let index = jobs.firstIndex(where: { $0.id == selectedJobID }) else {
+            return
+        }
+
+        var copy = jobs[index]
+        copy.id = "job-\(Int(Date().timeIntervalSince1970))"
+        copy.recipient = copy.recipient.isEmpty ? "" : "\(copy.recipient) copy"
+        jobs.append(copy)
+        selectedJobID = copy.id
+        configSummary = "Đã nhân bản lịch gửi."
+    }
+
+    func deleteSelectedJob() {
+        guard let id = selectedJobID, let index = jobs.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        jobs.remove(at: index)
+        if jobs.isEmpty {
+            let fallback = ScheduleJob.fresh()
+            jobs = [fallback]
+            selectedJobID = fallback.id
+        } else {
+            selectedJobID = jobs[min(index, jobs.count - 1)].id
+        }
+        configSummary = "Đã xóa lịch gửi."
+    }
+
+    func chooseImages(for jobID: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+
+        if panel.runModal() == .OK, let index = jobs.firstIndex(where: { $0.id == jobID }) {
+            let selected = panel.urls.map(\.path)
+            jobs[index].images.append(contentsOf: selected)
+            configSummary = "Đã thêm \(selected.count) ảnh vào lịch gửi."
+        }
+    }
+
+    func removeImage(_ imagePath: String, from jobID: String) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else {
+            return
+        }
+        jobs[index].images.removeAll { $0 == imagePath }
+        configSummary = "Đã xóa ảnh khỏi lịch gửi."
+    }
+
+    private func normalizedJobsForSaving() throws -> [ScheduleJob] {
+        var seenIDs: Set<String> = []
+        return try jobs.enumerated().map { offset, rawJob in
+            var job = rawJob
+            job.id = job.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if job.id.isEmpty {
+                job.id = "job-\(offset + 1)"
+            }
+            if seenIDs.contains(job.id) {
+                job.id = "\(job.id)-\(offset + 1)"
+            }
+            seenIDs.insert(job.id)
+
+            job.recipient = job.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+            job.message = job.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            job.images = job.images
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            guard !job.recipient.isEmpty else {
+                throw ValidationMessage("Lịch \(offset + 1): thiếu người nhận.")
+            }
+            guard !job.message.isEmpty || !job.images.isEmpty else {
+                throw ValidationMessage("Lịch \(offset + 1): cần tin nhắn hoặc ảnh.")
+            }
+
+            let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
+            job.schedule.type = type.rawValue
+            switch type {
+            case .daily:
+                if Self.dailyDate(from: job.schedule.at) == nil {
+                    job.schedule.at = "08:30"
+                }
+                let days = (job.schedule.days ?? [0, 1, 2, 3, 4, 5, 6]).filter { (0...6).contains($0) }
+                job.schedule.days = days.isEmpty ? [0, 1, 2, 3, 4, 5, 6] : Array(Set(days)).sorted()
+            case .once:
+                if Self.onceDate(from: job.schedule.at) == nil {
+                    job.schedule.at = Self.formatOnceDate(Date().addingTimeInterval(3600))
+                }
+                job.schedule.days = nil
+            }
+
+            return job
+        }
+    }
+
     func chooseConfigFile() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
@@ -230,6 +455,7 @@ final class LauncherModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             configPath = url.path
             appendLog("Đã chọn config: \(configPath)")
+            loadConfigFromDisk()
         }
     }
 
@@ -248,6 +474,19 @@ final class LauncherModel: ObservableObject {
                 appendLog("Đã thêm \(selected.count) ảnh test.")
             }
         }
+    }
+
+    var testImagePaths: [String] {
+        imagePaths()
+    }
+
+    func removeTestImage(_ imagePath: String) {
+        let remaining = imagePaths().filter { $0 != imagePath }
+        imagePathsText = remaining.joined(separator: "\n")
+    }
+
+    func clearTestImages() {
+        imagePathsText = ""
     }
 
     func openConfigInFinder() {
@@ -354,19 +593,48 @@ final class LauncherModel: ObservableObject {
             return
         }
 
-        guard let python = Self.resolvePythonPath() else {
-            appendLog("Không tìm thấy python3 để chạy: \(label)")
-            return
-        }
-
         currentTask = label
         appendLog(">> \(label): \(arguments.joined(separator: " "))")
         let resourceRoot = resourceRoot
         let dataRoot = dataRoot
         let environment = commandEnvironment()
+        let directArguments = directAutomationArguments(for: arguments)
+        let fallbackPython: String?
+        if directArguments == nil {
+            guard let python = Self.resolvePythonPath() else {
+                appendLog("Không tìm thấy python3 để chạy: \(label)")
+                currentTask = nil
+                return
+            }
+            fallbackPython = python
+        } else {
+            fallbackPython = nil
+        }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if let directArguments {
+                do {
+                    let text = try Self.directAutomationOutput(arguments: directArguments)
+                    DispatchQueue.main.async {
+                        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleaned.isEmpty {
+                            self?.appendLog(cleaned)
+                        }
+                        onSuccess?(text)
+                        self?.currentTask = nil
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self?.appendLog("ERROR: \(automationErrorMessage(from: error))")
+                        self?.appendLog("Lệnh '\(label)' lỗi.")
+                        self?.currentTask = nil
+                    }
+                }
+                return
+            }
+
             let process = Process()
+            let python = fallbackPython ?? "python3"
             process.executableURL = URL(fileURLWithPath: python)
             process.arguments = [resourceRoot.appendingPathComponent("main.py").path] + arguments
             process.environment = environment
@@ -400,6 +668,54 @@ final class LauncherModel: ObservableObject {
                     self?.currentTask = nil
                 }
             }
+        }
+    }
+
+    nonisolated private static func directAutomationOutput(arguments: [String]) throws -> String {
+        guard let command = arguments.first else {
+            throw ValidationMessage(automationUsage)
+        }
+
+        let automation = ZaloAutomation()
+        switch command {
+        case "accessibility-status":
+            return try encodedJSON(automation.accessibilityStatus(prompt: false))
+        case "request-accessibility":
+            return try encodedJSON(automation.accessibilityStatus(prompt: true))
+        case "probe":
+            return try encodedJSON(automation.probe())
+        case "open-chat":
+            let request = try parseSendRequest(arguments: Array(arguments.dropFirst()))
+            try automation.openChat(recipient: request.recipient)
+            return ""
+        case "send":
+            let request = try parseSendRequest(arguments: Array(arguments.dropFirst()))
+            try automation.send(request)
+            return ""
+        default:
+            throw ValidationMessage(automationUsage)
+        }
+    }
+
+    nonisolated private static func encodedJSON<T: Encodable>(_ value: T) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(value)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func directAutomationArguments(for arguments: [String]) -> [String]? {
+        guard let command = arguments.first else {
+            return nil
+        }
+
+        switch command {
+        case "accessibility-status", "request-accessibility", "probe", "open-chat":
+            return arguments
+        case "send-now":
+            return ["send"] + arguments.dropFirst()
+        default:
+            return nil
         }
     }
 
@@ -443,6 +759,48 @@ final class LauncherModel: ObservableObject {
         }
     }
 
+    static func onceDate(from value: String) -> Date? {
+        if let date = ISO8601DateFormatter().date(from: value) {
+            return date
+        }
+        return localDateFormatter.date(from: value)
+    }
+
+    static func formatOnceDate(_ date: Date) -> String {
+        localDateFormatter.string(from: date)
+    }
+
+    static func dailyDate(from value: String) -> Date? {
+        let parts = value.split(separator: ":")
+        guard
+            parts.count == 2,
+            let hour = Int(parts[0]),
+            let minute = Int(parts[1]),
+            (0...23).contains(hour),
+            (0...59).contains(minute)
+        else {
+            return nil
+        }
+
+        var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        components.hour = hour
+        components.minute = minute
+        return Calendar.current.date(from: components)
+    }
+
+    static func formatDailyTime(_ date: Date) -> String {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", components.hour ?? 8, components.minute ?? 30)
+    }
+
+    private static var localDateFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+        return formatter
+    }
+
     static func resolvePythonPath() -> String? {
         let candidates = [
             "/opt/homebrew/bin/python3",
@@ -483,12 +841,12 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         schedulerCard
                         accessibilityCard
-                        configCard
-                        probeCard
+                        advancedCard
                     }
                     .frame(width: 380)
 
                     VStack(alignment: .leading, spacing: 14) {
+                        scheduleConfigCard
                         testCard
                         logCard
                     }
@@ -509,7 +867,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Zalo Scheduler")
                     .font(.system(size: 28, weight: .semibold))
-                Text("Điều khiển lịch gửi, kiểm tra Zalo và gửi thử từ một màn hình.")
+                Text("Tạo lịch gửi Zalo bằng biểu mẫu, kèm tin nhắn và hình ảnh.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -546,9 +904,9 @@ struct ContentView: View {
                         color: model.schedulerRunning ? .green : .orange
                     )
                     metricTile(
-                        title: "Python",
-                        value: pythonDisplayName,
-                        systemImage: "terminal.fill",
+                        title: "Đã tạo",
+                        value: "\(model.jobs.count) lịch",
+                        systemImage: "calendar.badge.clock",
                         color: .blue
                     )
                 }
@@ -557,7 +915,7 @@ struct ContentView: View {
                     Button {
                         model.startScheduler()
                     } label: {
-                        Label("Start", systemImage: "play.fill")
+                        Label("Bắt đầu", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.schedulerRunning)
@@ -565,7 +923,7 @@ struct ContentView: View {
                     Button {
                         model.stopScheduler()
                     } label: {
-                        Label("Stop", systemImage: "stop.fill")
+                        Label("Dừng", systemImage: "stop.fill")
                     }
                     .disabled(!model.schedulerRunning)
 
@@ -574,7 +932,7 @@ struct ContentView: View {
                     Button {
                         model.validateConfig()
                     } label: {
-                        Label("Kiểm tra", systemImage: "checklist")
+                        Label("Kiểm tra lịch", systemImage: "checklist")
                     }
                 }
                 .disabled(model.currentTask != nil)
@@ -627,32 +985,319 @@ struct ContentView: View {
         }
     }
 
-    private var configCard: some View {
-        panel("Config & dữ liệu", systemImage: "folder.fill") {
+    private var advancedCard: some View {
+        panel("Nâng cao", systemImage: "wrench.and.screwdriver.fill") {
             VStack(alignment: .leading, spacing: 12) {
-                pathBlock(title: "Config", value: model.configPath)
-                pathBlock(title: "Data", value: model.dataRoot.path)
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 12) {
+                        pathBlock(title: "Config", value: model.configPath)
+                        pathBlock(title: "Data", value: model.dataRoot.path)
 
+                        HStack(spacing: 10) {
+                            Button {
+                                model.chooseConfigFile()
+                            } label: {
+                                Label("Chọn file", systemImage: "doc.badge.plus")
+                            }
+
+                            Button {
+                                model.openConfigInFinder()
+                            } label: {
+                                Label("Mở file", systemImage: "doc.text.magnifyingglass")
+                            }
+
+                            Menu {
+                                Button("Data folder", systemImage: "folder") { model.openDataFolder() }
+                                Button("Logs", systemImage: "text.alignleft") { model.openLogsFolder() }
+                            } label: {
+                                Label("Thư mục", systemImage: "ellipsis.circle")
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("File & thư mục")
+                        .font(.subheadline.weight(.medium))
+                }
+
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(model.statusSummary)
+                            .textSelection(.enabled)
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+                            .padding(10)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        HStack(spacing: 10) {
+                            Button {
+                                model.probeZalo()
+                            } label: {
+                                Label("Probe", systemImage: "waveform.path.ecg")
+                            }
+
+                            Button {
+                                model.buildHelper()
+                            } label: {
+                                Label("Build helper", systemImage: "hammer")
+                            }
+                        }
+                        .disabled(model.currentTask != nil)
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("Kiểm tra Zalo")
+                        .font(.subheadline.weight(.medium))
+                }
+            }
+        }
+    }
+
+    private var scheduleConfigCard: some View {
+        panel("Lịch gửi", systemImage: "calendar.badge.clock") {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Button {
-                        model.chooseConfigFile()
+                        model.addJob()
                     } label: {
-                        Label("Chọn", systemImage: "doc.badge.plus")
+                        Label("Thêm lịch", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
+                        model.duplicateSelectedJob()
+                    } label: {
+                        Label("Nhân bản", systemImage: "plus.square.on.square")
+                    }
+                    .disabled(model.selectedJobID == nil)
+
+                    Button {
+                        model.deleteSelectedJob()
+                    } label: {
+                        Label("Xóa", systemImage: "trash")
+                    }
+                    .disabled(model.jobs.count <= 1)
+
+                    Spacer()
+
+                    Text(model.configSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    Button {
+                        model.loadConfigFromDisk()
+                    } label: {
+                        Label("Tải lại", systemImage: "arrow.clockwise")
                     }
 
                     Button {
-                        model.openConfigInFinder()
+                        model.saveConfigFromForm()
                     } label: {
-                        Label("Mở", systemImage: "doc.text.magnifyingglass")
+                        Label("Lưu lịch", systemImage: "square.and.arrow.down")
                     }
+                    .buttonStyle(.borderedProminent)
+                }
+                .disabled(model.currentTask != nil)
 
-                    Menu {
-                        Button("Data folder", systemImage: "folder") { model.openDataFolder() }
-                        Button("Logs", systemImage: "text.alignleft") { model.openLogsFolder() }
-                    } label: {
-                        Label("Thư mục", systemImage: "ellipsis.circle")
+                HStack(alignment: .top, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.jobs) { job in
+                            jobRow(job)
+                        }
+                    }
+                    .frame(width: 260)
+
+                    Divider()
+
+                    if let index = model.jobs.firstIndex(where: { $0.id == model.selectedJobID }) {
+                        jobEditor(job: $model.jobs[index])
+                    } else {
+                        Text("Chưa chọn lịch gửi.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 360, alignment: .center)
                     }
                 }
+            }
+        }
+    }
+
+    private func jobRow(_ job: ScheduleJob) -> some View {
+        let isSelected = job.id == model.selectedJobID
+        let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
+        return Button {
+            model.selectedJobID = job.id
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Image(systemName: type.systemImage)
+                        .foregroundStyle(isSelected ? .white : .blue)
+                        .frame(width: 18)
+                    Text(job.recipient.isEmpty ? "Chưa có người nhận" : job.recipient)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer()
+                }
+
+                Text(scheduleSummary(for: job))
+                    .font(.caption)
+                    .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Label(job.message.isEmpty ? "Không có tin nhắn" : "Có tin nhắn", systemImage: job.message.isEmpty ? "text.badge.xmark" : "text.bubble")
+                    Label("\(job.images.count) ảnh", systemImage: "photo")
+                }
+                .font(.caption2)
+                .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.accentColor : Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.14), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func jobEditor(job: Binding<ScheduleJob>) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                field("Người nhận") {
+                    TextField("Tên đúng như Zalo", text: job.recipient)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Kiểu lịch")
+                        .font(.subheadline.weight(.medium))
+                    Picker("Kiểu lịch", selection: scheduleTypeBinding(for: job)) {
+                        ForEach(ScheduleType.allCases) { type in
+                            Label(type.title, systemImage: type.systemImage)
+                                .tag(type)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                .frame(width: 250)
+            }
+
+            field("Tin nhắn") {
+                plainEditor(text: job.message, minHeight: 96)
+            }
+
+            scheduleEditor(job: job)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Ảnh đính kèm")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    Button {
+                        model.chooseImages(for: job.wrappedValue.id)
+                    } label: {
+                        Label("Thêm ảnh", systemImage: "photo.on.rectangle")
+                    }
+                }
+
+                if job.wrappedValue.images.isEmpty {
+                    emptyState("Chưa chọn ảnh", systemImage: "photo")
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(job.wrappedValue.images, id: \.self) { imagePath in
+                            HStack(spacing: 8) {
+                                Image(systemName: "photo")
+                                    .foregroundStyle(.blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(URL(fileURLWithPath: imagePath).lastPathComponent)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Text(imagePath)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Button {
+                                    model.removeImage(imagePath, from: job.wrappedValue.id)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            .padding(9)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    model.saveConfigFromForm()
+                } label: {
+                    Label("Lưu lịch gửi", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.currentTask != nil)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func scheduleEditor(job: Binding<ScheduleJob>) -> some View {
+        let type = ScheduleType(rawValue: job.wrappedValue.schedule.type) ?? .daily
+        return VStack(alignment: .leading, spacing: 10) {
+            if type == .daily {
+                HStack(alignment: .center, spacing: 14) {
+                    DatePicker("Giờ gửi", selection: dailyTimeBinding(for: job), displayedComponents: .hourAndMinute)
+                        .datePickerStyle(.field)
+                        .frame(width: 210)
+
+                    dayToggleRow(job: job)
+                }
+            } else {
+                DatePicker("Ngày giờ gửi", selection: onceDateBinding(for: job), displayedComponents: [.date, .hourAndMinute])
+                    .datePickerStyle(.field)
+                    .frame(width: 330)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func dayToggleRow(job: Binding<ScheduleJob>) -> some View {
+        let days: [(Int, String)] = [(0, "T2"), (1, "T3"), (2, "T4"), (3, "T5"), (4, "T6"), (5, "T7"), (6, "CN")]
+        return HStack(spacing: 6) {
+            ForEach(days, id: \.0) { day, title in
+                let isOn = (job.wrappedValue.schedule.days ?? [0, 1, 2, 3, 4, 5, 6]).contains(day)
+                Button {
+                    var selected = Set(job.wrappedValue.schedule.days ?? [0, 1, 2, 3, 4, 5, 6])
+                    if selected.contains(day), selected.count > 1 {
+                        selected.remove(day)
+                    } else {
+                        selected.insert(day)
+                    }
+                    job.wrappedValue.schedule.days = selected.sorted()
+                } label: {
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 30, height: 26)
+                        .foregroundStyle(isOn ? .white : .primary)
+                        .background(isOn ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -709,28 +1354,37 @@ struct ContentView: View {
                         Text("Ảnh đính kèm")
                             .font(.subheadline.weight(.medium))
                         Spacer()
-                        Text("Mỗi dòng một đường dẫn")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    editor(text: $model.imagePathsText, minHeight: 92)
-
-                    HStack(spacing: 10) {
                         Button {
                             model.chooseImages()
                         } label: {
                             Label("Chọn ảnh", systemImage: "photo.on.rectangle")
                         }
+                    }
 
-                        Button {
-                            model.imagePathsText = ""
-                        } label: {
-                            Label("Xóa ảnh", systemImage: "trash")
+                    if model.testImagePaths.isEmpty {
+                        emptyState("Chưa chọn ảnh", systemImage: "photo")
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(model.testImagePaths, id: \.self) { imagePath in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "photo")
+                                        .foregroundStyle(.blue)
+                                    Text(URL(fileURLWithPath: imagePath).lastPathComponent)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button {
+                                        model.removeTestImage(imagePath)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                .padding(9)
+                                .background(Color(nsColor: .textBackgroundColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
                         }
-                        .disabled(model.imagePathsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                        Spacer()
                     }
                 }
 
@@ -793,6 +1447,99 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
         }
+    }
+
+    private func scheduleTypeBinding(for job: Binding<ScheduleJob>) -> Binding<ScheduleType> {
+        Binding<ScheduleType>(
+            get: {
+                ScheduleType(rawValue: job.wrappedValue.schedule.type) ?? .daily
+            },
+            set: { newValue in
+                job.wrappedValue.schedule.type = newValue.rawValue
+                switch newValue {
+                case .daily:
+                    job.wrappedValue.schedule.at = LauncherModel.formatDailyTime(Date())
+                    job.wrappedValue.schedule.days = [0, 1, 2, 3, 4, 5, 6]
+                case .once:
+                    job.wrappedValue.schedule.at = LauncherModel.formatOnceDate(Date().addingTimeInterval(3600))
+                    job.wrappedValue.schedule.days = nil
+                }
+            }
+        )
+    }
+
+    private func dailyTimeBinding(for job: Binding<ScheduleJob>) -> Binding<Date> {
+        Binding<Date>(
+            get: {
+                LauncherModel.dailyDate(from: job.wrappedValue.schedule.at) ?? Date()
+            },
+            set: { date in
+                job.wrappedValue.schedule.at = LauncherModel.formatDailyTime(date)
+            }
+        )
+    }
+
+    private func onceDateBinding(for job: Binding<ScheduleJob>) -> Binding<Date> {
+        Binding<Date>(
+            get: {
+                LauncherModel.onceDate(from: job.wrappedValue.schedule.at) ?? Date().addingTimeInterval(3600)
+            },
+            set: { date in
+                job.wrappedValue.schedule.at = LauncherModel.formatOnceDate(date)
+            }
+        )
+    }
+
+    private func scheduleSummary(for job: ScheduleJob) -> String {
+        let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
+        switch type {
+        case .daily:
+            let days = job.schedule.days ?? [0, 1, 2, 3, 4, 5, 6]
+            let dayText = days.count == 7 ? "hằng ngày" : days.map(dayLabel).joined(separator: ", ")
+            return "\(job.schedule.at) · \(dayText)"
+        case .once:
+            guard let date = LauncherModel.onceDate(from: job.schedule.at) else {
+                return "Một lần"
+            }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "vi_VN")
+            formatter.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
+            formatter.dateFormat = "HH:mm dd/MM/yyyy"
+            return formatter.string(from: date)
+        }
+    }
+
+    private func dayLabel(_ day: Int) -> String {
+        switch day {
+        case 0: return "T2"
+        case 1: return "T3"
+        case 2: return "T4"
+        case 3: return "T5"
+        case 4: return "T6"
+        case 5: return "T7"
+        case 6: return "CN"
+        default: return "-"
+        }
+    }
+
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+            content()
+        }
+    }
+
+    private func emptyState(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+            Text(title)
+        }
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, minHeight: 42)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var pythonDisplayName: String {
@@ -900,6 +1647,20 @@ struct ContentView: View {
     private func editor(text: Binding<String>, minHeight: CGFloat) -> some View {
         TextEditor(text: text)
             .font(.system(.body, design: .monospaced))
+            .scrollContentBackground(.hidden)
+            .padding(6)
+            .frame(minHeight: minHeight)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+            )
+    }
+
+    private func plainEditor(text: Binding<String>, minHeight: CGFloat) -> some View {
+        TextEditor(text: text)
+            .font(.body)
             .scrollContentBackground(.hidden)
             .padding(6)
             .frame(minHeight: minHeight)

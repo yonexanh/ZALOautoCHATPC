@@ -98,7 +98,7 @@ final class ZaloAutomation {
 
         activate(app)
         let window = try mainWindow(for: app)
-        let all = descendants(of: window)
+        let all = try interactiveDescendants(of: window)
 
         return ProbeResult(
             appRunning: true,
@@ -144,9 +144,15 @@ final class ZaloAutomation {
     }
 
     private func selectRecipient(named recipient: String, in window: AXUIElement) throws {
-        let field = try require(bestSearchField(in: descendants(of: window)), "Không tìm thấy ô tìm kiếm của Zalo.")
-        try focus(field)
-        try setValue(field, to: recipient)
+        let elements = try interactiveDescendants(of: window)
+        if let field = bestSearchField(in: elements) {
+            try click(element: field)
+            try replaceFocusedText(with: recipient)
+        } else {
+            try focusSearchFieldByPosition(in: window)
+            try replaceFocusedText(with: recipient)
+        }
+        usleep(700_000)
         do {
             try waitForSearchState(timeoutSeconds: 2.5)
         } catch {
@@ -159,11 +165,12 @@ final class ZaloAutomation {
 
     private func setComposerText(_ text: String, in app: NSRunningApplication) throws {
         let window = try mainWindow(for: app)
-        let composer = try require(
-            bestProbeMessageInput(in: descendants(of: window)),
-            "Không tìm thấy ô nhập tin nhắn."
-        )
-        try click(element: composer)
+        let elements = try interactiveDescendants(of: window)
+        if let composer = bestProbeMessageInput(in: elements) {
+            try click(element: composer)
+        } else {
+            try clickComposerByPosition(in: window)
+        }
         usleep(150_000)
         writeClipboard(text)
         try pressKey(keyCode: 9, modifiers: [.maskCommand])
@@ -176,30 +183,106 @@ final class ZaloAutomation {
             throw AutomationError.message("Không tìm thấy ảnh: \(standardizedPath)")
         }
 
+        do {
+            try attachImageWithOpenPanel(at: standardizedPath, app: app)
+        } catch {
+            let pickerError = automationErrorMessage(from: error)
+            try dismissOpenPanelsIfPresent()
+            do {
+                try attachImageViaClipboard(at: standardizedPath, app: app)
+            } catch {
+                let clipboardError = automationErrorMessage(from: error)
+                throw AutomationError.message("Không đính kèm được ảnh. Picker: \(pickerError). Clipboard: \(clipboardError)")
+            }
+        }
+    }
+
+    private func attachImageWithOpenPanel(at imagePath: String, app: NSRunningApplication) throws {
         let window = try mainWindow(for: app)
-        let button = try require(bestImageButton(in: descendants(of: window)), "Không tìm thấy nút Gửi hình ảnh.")
-        try press(elementOrAncestor: button)
-        usleep(700_000)
+        let elements = try interactiveDescendants(of: window)
+        if let button = bestImageButton(in: elements) {
+            try click(element: button)
+        } else {
+            try clickImageButtonByPosition(in: window)
+        }
+        usleep(350_000)
 
-        try pressKey(keyCode: 5, modifiers: [.maskCommand, .maskShift])
-        usleep(250_000)
+        if try waitForOpenPanel(timeoutSeconds: 2.0) == nil {
+            try clickImageButtonByPosition(in: window)
+            usleep(500_000)
+        }
 
-        guard let gotoWindow = try waitForWindow(id: "GoToWindow", timeoutSeconds: 3.0) else {
+        guard let openPanel = try waitForOpenPanel(timeoutSeconds: 4.0) else {
+            throw AutomationError.message("Không mở được hộp thoại chọn ảnh.")
+        }
+        try focusOrClick(openPanel)
+
+        var gotoWindow: AXUIElement?
+        for _ in 0..<3 {
+            try pressKey(keyCode: 5, modifiers: [.maskCommand, .maskShift])
+            usleep(250_000)
+            gotoWindow = try waitForGoToWindow(timeoutSeconds: 1.2)
+            if gotoWindow != nil {
+                break
+            }
+            try focusOrClick(openPanel)
+        }
+
+        guard let gotoWindow else {
             throw AutomationError.message("Không mở được hộp thoại nhập đường dẫn ảnh.")
         }
 
         let gotoField = try require(firstElement(
-            matching: { role(of: $0) == kAXTextFieldRole as String },
+            matching: { element in
+                self.stringAttribute("AXIdentifier", of: element) == "PathTextField"
+                    || self.role(of: element) == kAXTextFieldRole as String
+            },
             in: descendants(of: gotoWindow)
         ), "Không tìm thấy ô đường dẫn trong hộp thoại chọn ảnh.")
-        try focus(gotoField)
-        try setValue(gotoField, to: standardizedPath)
-        usleep(150_000)
+        try focusOrClick(gotoField)
+        try replaceFocusedText(with: imagePath)
 
         try pressKey(keyCode: 36)
-        usleep(250_000)
-        try pressKey(keyCode: 36)
+        usleep(450_000)
+
+        if let refreshedPanel = try waitForOpenPanel(timeoutSeconds: 1.5),
+           let openButton = button(namedAnyOf: ["mo", "open"], in: refreshedPanel) {
+            try click(element: openButton)
+        } else {
+            try pressKey(keyCode: 36)
+        }
         usleep(900_000)
+    }
+
+    private func attachImageViaClipboard(at imagePath: String, app: NSRunningApplication) throws {
+        let window = try mainWindow(for: app)
+        if let composer = bestProbeMessageInput(in: try interactiveDescendants(of: window)) {
+            try click(element: composer)
+        } else {
+            try clickComposerByPosition(in: window)
+        }
+
+        guard let image = NSImage(contentsOfFile: imagePath) else {
+            throw AutomationError.message("File không đọc được như ảnh: \(imagePath)")
+        }
+
+        let url = URL(fileURLWithPath: imagePath)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(url.absoluteString, forType: .fileURL)
+        if let data = try? Data(contentsOf: url), url.pathExtension.localizedCaseInsensitiveContains("png") {
+            item.setData(data, forType: .png)
+        }
+        if let tiffData = image.tiffRepresentation {
+            item.setData(tiffData, forType: .tiff)
+        }
+        guard pasteboard.writeObjects([item]) else {
+            throw AutomationError.message("Không ghi được ảnh vào clipboard.")
+        }
+
+        try pressKey(keyCode: 9, modifiers: [.maskCommand])
+        usleep(1_000_000)
     }
 
     private func refreshedMainWindow() throws -> AXUIElement {
@@ -224,6 +307,63 @@ final class ZaloAutomation {
         descendants(of: window).contains { element in
             let labelText = label(for: element) ?? ""
             return labelText.localizedCaseInsensitiveContains("Không tìm thấy kết quả")
+        }
+    }
+
+    private func interactiveDescendants(of window: AXUIElement) throws -> [AXUIElement] {
+        var elements = descendants(of: window)
+        if hasCoreControls(in: elements) {
+            return elements
+        }
+
+        try wakeZaloWebView(in: window)
+        elements = descendants(of: window)
+        return elements
+    }
+
+    private func hasCoreControls(in elements: [AXUIElement]) -> Bool {
+        bestSearchField(in: elements) != nil
+            || bestProbeMessageInput(in: elements) != nil
+            || bestImageButton(in: elements) != nil
+    }
+
+    private func wakeZaloWebView(in window: AXUIElement) throws {
+        try focusSearchFieldByPosition(in: window)
+        usleep(350_000)
+    }
+
+    private func focusSearchFieldByPosition(in window: AXUIElement) throws {
+        let frame = try windowFrame(window)
+        let point = CGPoint(
+            x: frame.minX + min(160, max(90, frame.width * 0.18)),
+            y: frame.minY + 40
+        )
+        try click(at: point)
+    }
+
+    private func clickComposerByPosition(in window: AXUIElement) throws {
+        let frame = try windowFrame(window)
+        let point = CGPoint(
+            x: min(max(frame.minX + 420, frame.minX + frame.width * 0.45), frame.maxX - 130),
+            y: frame.maxY - 36
+        )
+        try click(at: point)
+    }
+
+    private func clickImageButtonByPosition(in window: AXUIElement) throws {
+        let frame = try windowFrame(window)
+        let point = CGPoint(
+            x: min(max(frame.minX + 462, frame.minX + frame.width * 0.50), frame.maxX - 210),
+            y: frame.maxY - 87
+        )
+        try click(at: point)
+    }
+
+    private func focusOrClick(_ element: AXUIElement) throws {
+        if position(of: element) != nil {
+            try click(element: element)
+        } else {
+            try focus(element)
         }
     }
 
@@ -314,17 +454,100 @@ final class ZaloAutomation {
     }
 
     private func waitForWindow(id: String, timeoutSeconds: Double) throws -> AXUIElement? {
+        try waitForElement(timeoutSeconds: timeoutSeconds) { element in
+            self.stringAttribute("AXIdentifier", of: element) == id
+        }
+    }
+
+    private func waitForOpenPanel(timeoutSeconds: Double) throws -> AXUIElement? {
+        try waitForElement(timeoutSeconds: timeoutSeconds, matching: isOpenPanelLike)
+    }
+
+    private func waitForGoToWindow(timeoutSeconds: Double) throws -> AXUIElement? {
+        try waitForElement(timeoutSeconds: timeoutSeconds, matching: isGoToWindowLike)
+    }
+
+    private func waitForElement(
+        timeoutSeconds: Double,
+        matching predicate: @escaping (AXUIElement) -> Bool
+    ) throws -> AXUIElement? {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             guard let app = runningZaloApplication() else { break }
             let appElement = AXUIElementCreateApplication(app.processIdentifier)
-            let windows = copyElementArrayAttribute(kAXWindowsAttribute, of: appElement)
-            if let match = windows.first(where: { stringAttribute("AXIdentifier", of: $0) == id }) {
+            var roots = [appElement]
+            roots.append(contentsOf: copyElementArrayAttribute(kAXWindowsAttribute, of: appElement))
+            if let focusedWindow = copyElementAttribute(kAXFocusedWindowAttribute, of: appElement) {
+                roots.append(focusedWindow)
+            }
+
+            if let match = roots.lazy.flatMap({ self.descendants(of: $0) }).first(where: predicate) {
                 return match
             }
             usleep(100_000)
         }
         return nil
+    }
+
+    private func isOpenPanelLike(_ element: AXUIElement) -> Bool {
+        if stringAttribute("AXIdentifier", of: element) == "open-panel" {
+            return true
+        }
+
+        let roleName = role(of: element) ?? ""
+        guard roleName == kAXWindowRole as String || roleName == kAXSheetRole as String else {
+            return false
+        }
+
+        let ownLabel = normalize(label(for: element) ?? "")
+        if ownLabel.contains("chon hinh anh") || ownLabel.contains("choose image") || ownLabel == "open" {
+            return true
+        }
+
+        let labels = descendants(of: element, maxDepth: 6)
+            .compactMap(label(for:))
+            .map { self.normalize($0) }
+        return labels.contains("huy") && (labels.contains("mo") || labels.contains("open"))
+    }
+
+    private func isGoToWindowLike(_ element: AXUIElement) -> Bool {
+        if stringAttribute("AXIdentifier", of: element) == "GoToWindow" {
+            return true
+        }
+
+        let children = descendants(of: element, maxDepth: 6)
+        if children.contains(where: { stringAttribute("AXIdentifier", of: $0) == "PathTextField" }) {
+            return true
+        }
+
+        let roleName = role(of: element) ?? ""
+        guard roleName == kAXWindowRole as String || roleName == kAXSheetRole as String else {
+            return false
+        }
+
+        let ownLabel = normalize(label(for: element) ?? "")
+        return ownLabel.contains("go to") || ownLabel.contains("di toi")
+    }
+
+    private func button(namedAnyOf normalizedNames: Set<String>, in root: AXUIElement) -> AXUIElement? {
+        descendants(of: root, maxDepth: 10).first { element in
+            guard role(of: element) == kAXButtonRole as String else {
+                return false
+            }
+            let buttonLabel = normalize(label(for: element) ?? "")
+            return normalizedNames.contains(buttonLabel)
+        }
+    }
+
+    private func dismissOpenPanelsIfPresent() throws {
+        let hasOpenPanel = try waitForOpenPanel(timeoutSeconds: 0.2) != nil
+        let hasGoToWindow = try waitForGoToWindow(timeoutSeconds: 0.2) != nil
+        if hasOpenPanel || hasGoToWindow {
+            try pressKey(keyCode: 53)
+            usleep(250_000)
+            try pressKey(keyCode: 53)
+            usleep(250_000)
+        }
     }
 
     private func ensureAccessibilityTrusted(prompt: Bool) throws {
@@ -475,6 +698,13 @@ final class ZaloAutomation {
         return nil
     }
 
+    private func windowFrame(_ window: AXUIElement) throws -> CGRect {
+        guard let position = position(of: window), let size = size(of: window) else {
+            throw AutomationError.message("Không xác định được vị trí/kích thước cửa sổ Zalo.")
+        }
+        return CGRect(origin: position, size: size)
+    }
+
     private func copyElementAttribute(_ attribute: String, of element: AXUIElement) -> AXUIElement? {
         guard
             let rawValue = copyAttribute(attribute, of: element),
@@ -494,6 +724,14 @@ final class ZaloAutomation {
         guard error == .success else {
             throw AutomationError.message("Không thể gán nội dung cho phần tử Zalo. Mã lỗi: \(error.rawValue)")
         }
+    }
+
+    private func replaceFocusedText(with text: String) throws {
+        try pressKey(keyCode: 0, modifiers: [.maskCommand])
+        usleep(80_000)
+        writeClipboard(text)
+        try pressKey(keyCode: 9, modifiers: [.maskCommand])
+        usleep(250_000)
     }
 
     private func focus(_ element: AXUIElement) throws {
