@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST_DIR = ROOT / "dist"
 APP_NAME = "ZaloSchedulerLauncher"
-APP_VERSION = "1.3.1"
-APP_BUILD = "6"
+APP_VERSION = "1.4.0"
+APP_BUILD = "7"
 APP_DIR = DIST_DIR / f"{APP_NAME}.app"
 CONTENTS_DIR = APP_DIR / "Contents"
 MACOS_DIR = CONTENTS_DIR / "MacOS"

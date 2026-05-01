@@ -108,6 +108,7 @@ enum MediaKind {
 }
 
 struct SchedulerConfig: Codable {
+    var zaloApp: ZaloAppTarget?
     var jobs: [ScheduleJob]
 }
 
@@ -165,6 +166,9 @@ final class LauncherModel: ObservableObject {
     @Published var jobs: [ScheduleJob] = []
     @Published var selectedJobID: String?
     @Published var configSummary: String = "Đang đọc lịch gửi."
+    @Published var runningZaloApps: [ZaloApplicationInfo] = []
+    @Published var selectedZaloApp: ZaloAppTarget?
+    @Published var selectedZaloSummary: String = "Chưa chọn Zalo gửi tin."
 
     private var schedulerProcess: Process?
     private let fileManager = FileManager.default
@@ -190,6 +194,9 @@ final class LauncherModel: ObservableObject {
         appendLog("Python: \(pythonPath)")
         loadConfigFromDisk()
         checkAccessibilityStatus()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.refreshZaloApps()
+        }
     }
 
     deinit {
@@ -213,8 +220,14 @@ final class LauncherModel: ObservableObject {
     }
 
     func probeZalo() {
-        runOneShot(label: "Probe Zalo", arguments: ["probe"]) { [weak self] stdout in
+        runOneShot(label: "Probe Zalo", arguments: ["probe"] + selectedZaloArguments()) { [weak self] stdout in
             self?.updateProbeStatus(from: stdout)
+        }
+    }
+
+    func refreshZaloApps() {
+        runOneShot(label: "Quét Zalo đang mở", arguments: ["list-zalo-apps"]) { [weak self] stdout in
+            self?.updateZaloApps(from: stdout)
         }
     }
 
@@ -230,7 +243,7 @@ final class LauncherModel: ObservableObject {
             appendLog("Thiếu recipient để mở chat test.")
             return
         }
-        runOneShot(label: "Open chat", arguments: ["open-chat", "--recipient", recipient])
+        runOneShot(label: "Open chat", arguments: ["open-chat", "--recipient", recipient] + selectedZaloArguments())
     }
 
     func sendTestNow() {
@@ -241,6 +254,7 @@ final class LauncherModel: ObservableObject {
         }
 
         var arguments = ["send-now", "--recipient", trimmedRecipient]
+        arguments.append(contentsOf: selectedZaloArguments())
         if !message.isEmpty {
             arguments.append(contentsOf: ["--message", message])
         }
@@ -322,9 +336,11 @@ final class LauncherModel: ObservableObject {
             let url = URL(fileURLWithPath: configPath)
             let data = try Data(contentsOf: url)
             let config = try JSONDecoder().decode(SchedulerConfig.self, from: data)
+            selectedZaloApp = config.zaloApp
             jobs = config.jobs.isEmpty ? [ScheduleJob.fresh()] : config.jobs
             selectedJobID = jobs.first?.id
             configSummary = "Đã đọc \(jobs.count) lịch gửi."
+            updateSelectedZaloSummary()
         } catch {
             let fallback = ScheduleJob.fresh()
             jobs = [fallback]
@@ -338,7 +354,7 @@ final class LauncherModel: ObservableObject {
     func saveConfigFromForm() -> Bool {
         do {
             let cleanedJobs = try normalizedJobsForSaving()
-            let config = SchedulerConfig(jobs: cleanedJobs)
+            let config = SchedulerConfig(zaloApp: normalizedSelectedZaloApp(), jobs: cleanedJobs)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(config)
@@ -564,6 +580,7 @@ final class LauncherModel: ObservableObject {
 
             let appRunning: Bool
             let focusedWindowTitle: String
+            let targetApp: ZaloApplicationInfo?
             let searchField: Element?
             let messageInput: Element?
             let imageButton: Element?
@@ -574,6 +591,8 @@ final class LauncherModel: ObservableObject {
             let probe = try JSONDecoder().decode(Probe.self, from: data)
             statusSummary = """
             appRunning=\(probe.appRunning)
+            target=\(probe.targetApp?.displayName ?? "-")
+            pid=\(probe.targetApp.map { "\($0.pid)" } ?? "-")
             window=\(probe.focusedWindowTitle)
             search=\(probe.searchField?.role ?? "-")
             input=\(probe.messageInput?.value ?? "-")
@@ -610,6 +629,81 @@ final class LauncherModel: ObservableObject {
             accessibilityTrusted = nil
             accessibilitySummary = "Có output nhưng parse trạng thái Accessibility lỗi."
         }
+    }
+
+    private func updateZaloApps(from stdout: String) {
+        guard let data = stdout.data(using: .utf8) else {
+            selectedZaloSummary = "Không đọc được danh sách Zalo."
+            return
+        }
+
+        do {
+            let apps = try JSONDecoder().decode([ZaloApplicationInfo].self, from: data)
+            runningZaloApps = apps
+            if selectedZaloApp == nil, let first = apps.first {
+                selectZaloApp(first)
+            } else {
+                updateSelectedZaloSummary()
+            }
+            appendLog(apps.isEmpty ? "Không thấy Zalo nào đang mở." : "Đã thấy \(apps.count) bản Zalo đang mở.")
+        } catch {
+            selectedZaloSummary = "Parse danh sách Zalo lỗi."
+            appendLog("Không đọc được danh sách Zalo: \(error.localizedDescription)")
+        }
+    }
+
+    func selectZaloApp(_ app: ZaloApplicationInfo) {
+        selectedZaloApp = ZaloAppTarget(pid: app.pid, executablePath: app.executablePath)
+        selectedZaloSummary = "\(app.displayName) · PID \(app.pid)"
+        configSummary = "Đã chọn Zalo gửi tin: \(app.name)."
+    }
+
+    private func updateSelectedZaloSummary() {
+        guard let target = selectedZaloApp else {
+            selectedZaloSummary = "Chưa chọn Zalo gửi tin."
+            return
+        }
+
+        if let pid = target.pid,
+           let app = runningZaloApps.first(where: { $0.pid == pid }) {
+            selectedZaloSummary = "\(app.displayName) · PID \(app.pid)"
+            return
+        }
+
+        if let path = target.executablePath, !path.isEmpty {
+            let appName = URL(fileURLWithPath: path).deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+            selectedZaloSummary = appName.isEmpty ? path : "\(appName) · theo đường dẫn"
+            return
+        }
+
+        selectedZaloSummary = "Chưa chọn Zalo gửi tin."
+    }
+
+    private func normalizedSelectedZaloApp() -> ZaloAppTarget? {
+        guard let target = selectedZaloApp else {
+            return nil
+        }
+        let hasPID = target.pid != nil
+        let path = target.executablePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !hasPID && path.isEmpty {
+            return nil
+        }
+        return ZaloAppTarget(pid: target.pid, executablePath: path.isEmpty ? nil : path)
+    }
+
+    private func selectedZaloArguments() -> [String] {
+        guard let target = normalizedSelectedZaloApp() else {
+            return []
+        }
+
+        var arguments: [String] = []
+        if let pid = target.pid {
+            arguments.append(contentsOf: ["--zalo-pid", "\(pid)"])
+        }
+        if let path = target.executablePath, !path.isEmpty {
+            arguments.append(contentsOf: ["--zalo-path", path])
+        }
+        return arguments
     }
 
     private func runOneShot(label: String, arguments: [String], onSuccess: ((String) -> Void)? = nil) {
@@ -701,12 +795,15 @@ final class LauncherModel: ObservableObject {
             throw ValidationMessage(automationUsage)
         }
 
-        let automation = ZaloAutomation()
+        let target = try parseZaloTarget(arguments: Array(arguments.dropFirst()))
+        let automation = ZaloAutomation(target: target)
         switch command {
         case "accessibility-status":
             return try encodedJSON(automation.accessibilityStatus(prompt: false))
         case "request-accessibility":
             return try encodedJSON(automation.accessibilityStatus(prompt: true))
+        case "list-zalo-apps":
+            return try encodedJSON(automation.listZaloApplications())
         case "probe":
             return try encodedJSON(automation.probe())
         case "open-chat":
@@ -735,7 +832,7 @@ final class LauncherModel: ObservableObject {
         }
 
         switch command {
-        case "accessibility-status", "request-accessibility", "probe", "open-chat":
+        case "accessibility-status", "request-accessibility", "list-zalo-apps", "probe", "open-chat":
             return arguments
         case "send-now":
             return ["send"] + arguments.dropFirst()
@@ -882,6 +979,7 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 18) {
                     VStack(alignment: .leading, spacing: 14) {
                         schedulerCard
+                        zaloAppCard
                         accessibilityCard
                         advancedCard
                     }
@@ -1006,6 +1104,52 @@ struct ContentView: View {
                         model.validateConfig()
                     } label: {
                         Label("Kiểm tra lịch", systemImage: "checklist")
+                    }
+                }
+                .disabled(model.currentTask != nil)
+            }
+        }
+    }
+
+    private var zaloAppCard: some View {
+        panel("Zalo gửi tin", systemImage: "bubble.left.and.bubble.right.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                statusBanner(
+                    title: selectedZaloTitle,
+                    detail: model.selectedZaloSummary,
+                    systemImage: "apps.iphone",
+                    color: brandPrimary
+                )
+
+                Menu {
+                    if model.runningZaloApps.isEmpty {
+                        Button("Chưa thấy Zalo đang mở") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(model.runningZaloApps, id: \.pid) { app in
+                            Button {
+                                model.selectZaloApp(app)
+                            } label: {
+                                Text("\(app.displayName) · PID \(app.pid)")
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Chọn bản Zalo", systemImage: "arrow.up.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        model.refreshZaloApps()
+                    } label: {
+                        Label("Làm mới", systemImage: "arrow.clockwise")
+                    }
+
+                    Button {
+                        model.probeZalo()
+                    } label: {
+                        Label("Kiểm tra", systemImage: "scope")
                     }
                 }
                 .disabled(model.currentTask != nil)
@@ -1667,6 +1811,21 @@ struct ContentView: View {
 
     private var pythonDisplayName: String {
         URL(fileURLWithPath: model.pythonPath).lastPathComponent.isEmpty ? model.pythonPath : URL(fileURLWithPath: model.pythonPath).lastPathComponent
+    }
+
+    private var selectedZaloTitle: String {
+        guard let target = model.selectedZaloApp else {
+            return "Chưa chọn Zalo"
+        }
+        if let pid = target.pid,
+           let app = model.runningZaloApps.first(where: { $0.pid == pid }) {
+            return app.name
+        }
+        if let path = target.executablePath, !path.isEmpty {
+            let appName = URL(fileURLWithPath: path).deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+            return appName.isEmpty ? "Zalo đã chọn" : appName
+        }
+        return "Zalo đã chọn"
     }
 
     private var accessibilityTitle: String {

@@ -35,10 +35,33 @@ struct SizeInfo: Codable {
 struct ProbeResult: Codable {
     let appRunning: Bool
     let focusedWindowTitle: String
+    let targetApp: ZaloApplicationInfo?
     let searchField: ElementInfo?
     let messageInput: ElementInfo?
     let imageButton: ElementInfo?
     let attachmentButton: ElementInfo?
+}
+
+struct ZaloApplicationInfo: Codable {
+    let pid: Int32
+    let name: String
+    let bundleIdentifier: String?
+    let executablePath: String
+    let bundlePath: String
+    let isActive: Bool
+    let windowTitle: String
+
+    var displayName: String {
+        if !windowTitle.isEmpty {
+            return "\(name) - \(windowTitle)"
+        }
+        return name
+    }
+}
+
+struct ZaloAppTarget: Codable, Equatable {
+    var pid: Int32?
+    var executablePath: String?
 }
 
 struct AccessibilityTrustReport: Codable {
@@ -53,10 +76,16 @@ struct SendRequest {
     let recipient: String
     let message: String?
     let images: [String]
+    let zaloTarget: ZaloAppTarget?
 }
 
 final class ZaloAutomation {
     private let bundleIdentifier = "com.vng.zalo"
+    private let target: ZaloAppTarget?
+
+    init(target: ZaloAppTarget? = nil) {
+        self.target = target
+    }
 
     func accessibilityStatus(prompt: Bool) -> AccessibilityTrustReport {
         if prompt && !AXIsProcessTrusted() {
@@ -85,12 +114,17 @@ final class ZaloAutomation {
         )
     }
 
+    func listZaloApplications() throws -> [ZaloApplicationInfo] {
+        return runningZaloApplications().map(info(for:))
+    }
+
     func probe() throws -> ProbeResult {
         try ensureAccessibilityTrusted(prompt: false)
         guard let app = runningZaloApplication() else {
             return ProbeResult(
                 appRunning: false,
                 focusedWindowTitle: "",
+                targetApp: nil,
                 searchField: nil,
                 messageInput: nil,
                 imageButton: nil,
@@ -105,6 +139,7 @@ final class ZaloAutomation {
         return ProbeResult(
             appRunning: true,
             focusedWindowTitle: stringAttribute(kAXTitleAttribute, of: window) ?? "",
+            targetApp: info(for: app),
             searchField: bestSearchField(in: all).map(info(for:)),
             messageInput: bestProbeMessageInput(in: all).map(info(for:)),
             imageButton: bestImageButton(in: all).map(info(for:)),
@@ -540,7 +575,93 @@ final class ZaloAutomation {
     }
 
     private func runningZaloApplication() -> NSRunningApplication? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
+        let candidates = runningZaloApplications()
+
+        if let pid = target?.pid,
+           let match = candidates.first(where: { $0.processIdentifier == pid }) {
+            return match
+        }
+
+        if let path = target?.executablePath, !path.isEmpty {
+            let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+            if let match = candidates.first(where: { app in
+                app.executableURL?.standardizedFileURL.path == standardizedPath
+            }) {
+                return match
+            }
+        }
+
+        if let active = candidates.first(where: { $0.isActive }) {
+            return active
+        }
+
+        if let standard = candidates.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
+            return standard
+        }
+
+        return candidates.first
+    }
+
+    private func runningZaloApplications() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications
+            .filter(isZaloCandidate)
+            .sorted { lhs, rhs in
+                if lhs.isActive != rhs.isActive {
+                    return lhs.isActive && !rhs.isActive
+                }
+                return lhs.processIdentifier < rhs.processIdentifier
+            }
+    }
+
+    private func isZaloCandidate(_ app: NSRunningApplication) -> Bool {
+        guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return false
+        }
+        guard app.activationPolicy == .regular else {
+            return false
+        }
+
+        let bundleID = app.bundleIdentifier ?? ""
+        let name = app.localizedName ?? ""
+        let executablePath = app.executableURL?.path ?? ""
+        let executableName = URL(fileURLWithPath: executablePath).lastPathComponent
+
+        let normalizedBundleID = normalize(bundleID)
+        let normalizedName = normalize(name)
+        let normalizedExecutableName = normalize(executableName)
+
+        if normalizedName.contains("scheduler") || normalizedBundleID.contains("scheduler") {
+            return false
+        }
+
+        return bundleID == bundleIdentifier
+            || normalizedName == "zalo"
+            || normalizedExecutableName == "zalo"
+            || (normalizedBundleID.contains("zalo") && normalizedExecutableName.contains("zalo"))
+    }
+
+    private func info(for app: NSRunningApplication) -> ZaloApplicationInfo {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let windowTitle: String
+        if let focused = copyElementAttribute(kAXFocusedWindowAttribute, of: appElement) {
+            windowTitle = stringAttribute(kAXTitleAttribute, of: focused) ?? ""
+        } else if let main = copyElementAttribute(kAXMainWindowAttribute, of: appElement) {
+            windowTitle = stringAttribute(kAXTitleAttribute, of: main) ?? ""
+        } else if let firstWindow = copyElementArrayAttribute(kAXWindowsAttribute, of: appElement).first {
+            windowTitle = stringAttribute(kAXTitleAttribute, of: firstWindow) ?? ""
+        } else {
+            windowTitle = ""
+        }
+
+        return ZaloApplicationInfo(
+            pid: app.processIdentifier,
+            name: app.localizedName ?? "Zalo",
+            bundleIdentifier: app.bundleIdentifier,
+            executablePath: app.executableURL?.standardizedFileURL.path ?? "",
+            bundlePath: app.bundleURL?.standardizedFileURL.path ?? "",
+            isActive: app.isActive,
+            windowTitle: windowTitle
+        )
     }
 
     private func mainWindow(for app: NSRunningApplication) throws -> AXUIElement {
@@ -981,12 +1102,13 @@ func printJSON<T: Encodable>(_ value: T) throws {
 let automationCommands: Set<String> = [
     "accessibility-status",
     "request-accessibility",
+    "list-zalo-apps",
     "probe",
     "open-chat",
     "send",
 ]
 
-let automationUsage = "Dùng: accessibility-status | request-accessibility | probe | open-chat --recipient <tên> | send --recipient <tên> [--message <text>] [--image <path> ...]"
+let automationUsage = "Dùng: accessibility-status | request-accessibility | list-zalo-apps | probe [--zalo-pid <pid>] | open-chat --recipient <tên> [--zalo-pid <pid>] | send --recipient <tên> [--zalo-pid <pid>] [--message <text>] [--image <path> ...]"
 
 func isAutomationCommand(_ command: String) -> Bool {
     automationCommands.contains(command)
@@ -1005,13 +1127,16 @@ func runAutomationCommand(arguments: [String]) throws -> Bool {
         return false
     }
 
-    let automation = ZaloAutomation()
+    let target = try parseZaloTarget(arguments: Array(arguments.dropFirst()))
+    let automation = ZaloAutomation(target: target)
 
     switch command {
     case "accessibility-status":
         try printJSON(automation.accessibilityStatus(prompt: false))
     case "request-accessibility":
         try printJSON(automation.accessibilityStatus(prompt: true))
+    case "list-zalo-apps":
+        try printJSON(automation.listZaloApplications())
     case "probe":
         try printJSON(automation.probe())
     case "open-chat":
@@ -1031,11 +1156,24 @@ func parseSendRequest(arguments: [String]) throws -> SendRequest {
     var recipient: String?
     var message: String?
     var images: [String] = []
+    var target = ZaloAppTarget()
 
     var index = 0
     while index < arguments.count {
         let argument = arguments[index]
         switch argument {
+        case "--zalo-pid":
+            index += 1
+            guard index < arguments.count, let pid = Int32(arguments[index]) else {
+                throw AutomationError.message("Thiếu hoặc sai giá trị cho --zalo-pid")
+            }
+            target.pid = pid
+        case "--zalo-path":
+            index += 1
+            guard index < arguments.count else {
+                throw AutomationError.message("Thiếu giá trị cho --zalo-path")
+            }
+            target.executablePath = URL(fileURLWithPath: arguments[index]).standardizedFileURL.path
         case "--recipient":
             index += 1
             guard index < arguments.count else {
@@ -1064,5 +1202,32 @@ func parseSendRequest(arguments: [String]) throws -> SendRequest {
         throw AutomationError.message("Cần cung cấp --recipient")
     }
 
-    return SendRequest(recipient: recipient, message: message, images: images)
+    let normalizedTarget = target.pid == nil && (target.executablePath ?? "").isEmpty ? nil : target
+    return SendRequest(recipient: recipient, message: message, images: images, zaloTarget: normalizedTarget)
+}
+
+func parseZaloTarget(arguments: [String]) throws -> ZaloAppTarget? {
+    var target = ZaloAppTarget()
+    var index = 0
+    while index < arguments.count {
+        let argument = arguments[index]
+        switch argument {
+        case "--zalo-pid":
+            index += 1
+            guard index < arguments.count, let pid = Int32(arguments[index]) else {
+                throw AutomationError.message("Thiếu hoặc sai giá trị cho --zalo-pid")
+            }
+            target.pid = pid
+        case "--zalo-path":
+            index += 1
+            guard index < arguments.count else {
+                throw AutomationError.message("Thiếu giá trị cho --zalo-path")
+            }
+            target.executablePath = URL(fileURLWithPath: arguments[index]).standardizedFileURL.path
+        default:
+            break
+        }
+        index += 1
+    }
+    return target.pid == nil && (target.executablePath ?? "").isEmpty ? nil : target
 }

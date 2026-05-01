@@ -133,9 +133,31 @@ def helper_command(*args: str) -> list[str]:
     return [str(helper_bin), *args]
 
 
-def probe() -> int:
+def zalo_target_args(zalo_pid: int | None = None, zalo_path: str | None = None, target: dict[str, Any] | None = None) -> list[str]:
+    if target:
+        if target.get("pid") is not None:
+            zalo_pid = int(target["pid"])
+        if target.get("executablePath"):
+            zalo_path = str(target["executablePath"])
+
+    args: list[str] = []
+    if zalo_pid is not None:
+        args.extend(["--zalo-pid", str(zalo_pid)])
+    if zalo_path:
+        args.extend(["--zalo-path", str(Path(zalo_path).expanduser().resolve())])
+    return args
+
+def list_zalo_apps() -> int:
     ensure_default_files()
-    result = run_command(helper_command("probe"))
+    result = run_command(helper_command("list-zalo-apps"))
+    sys.stdout.write(result.stdout)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+    return result.returncode
+
+def probe(zalo_pid: int | None = None, zalo_path: str | None = None) -> int:
+    ensure_default_files()
+    result = run_command(helper_command("probe", *zalo_target_args(zalo_pid, zalo_path)))
     sys.stdout.write(result.stdout)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
@@ -153,9 +175,9 @@ def accessibility_status(prompt: bool) -> int:
     return result.returncode
 
 
-def open_chat(recipient: str) -> int:
+def open_chat(recipient: str, zalo_pid: int | None = None, zalo_path: str | None = None) -> int:
     ensure_default_files()
-    result = run_command(helper_command("open-chat", "--recipient", recipient))
+    result = run_command(helper_command("open-chat", "--recipient", recipient, *zalo_target_args(zalo_pid, zalo_path)))
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:
@@ -163,9 +185,16 @@ def open_chat(recipient: str) -> int:
     return result.returncode
 
 
-def send_now(recipient: str, message: str | None, images: list[str]) -> int:
+def send_now(
+    recipient: str,
+    message: str | None,
+    images: list[str],
+    zalo_pid: int | None = None,
+    zalo_path: str | None = None,
+    target: dict[str, Any] | None = None,
+) -> int:
     ensure_default_files()
-    command = ["send", "--recipient", recipient]
+    command = ["send", "--recipient", recipient, *zalo_target_args(zalo_pid, zalo_path, target)]
     if message is not None:
         command.extend(["--message", message])
     for image in images:
@@ -183,6 +212,17 @@ def validate_config(config: dict[str, Any]) -> None:
     jobs = config.get("jobs")
     if not isinstance(jobs, list) or not jobs:
         raise ValueError("Config phải có mảng 'jobs' và không được rỗng.")
+
+    zalo_app = config.get("zaloApp")
+    if zalo_app is not None:
+        if not isinstance(zalo_app, dict):
+            raise ValueError("zaloApp phải là object nếu được cấu hình.")
+        pid = zalo_app.get("pid")
+        executable_path = zalo_app.get("executablePath")
+        if pid is not None and not isinstance(pid, int):
+            raise ValueError("zaloApp.pid phải là số.")
+        if executable_path is not None and not isinstance(executable_path, str):
+            raise ValueError("zaloApp.executablePath phải là chuỗi.")
 
     for job in jobs:
         if not isinstance(job, dict):
@@ -278,6 +318,7 @@ def run_scheduler(config_path: Path, state_path: Path, poll_seconds: int) -> int
 
     config = load_json(config_path)
     validate_config(config)
+    zalo_target = config.get("zaloApp") if isinstance(config.get("zaloApp"), dict) else None
     state = load_json(state_path) if state_path.exists() else {"jobs": {}}
     state.setdefault("jobs", {})
 
@@ -296,6 +337,7 @@ def run_scheduler(config_path: Path, state_path: Path, poll_seconds: int) -> int
                 recipient=job["recipient"],
                 message=job.get("message"),
                 images=job.get("images", []) or [],
+                target=zalo_target,
             )
 
             if exit_code == 0:
@@ -319,10 +361,16 @@ def main() -> int:
     subparsers.add_parser("build-helper")
     subparsers.add_parser("accessibility-status")
     subparsers.add_parser("request-accessibility")
-    subparsers.add_parser("probe")
+    subparsers.add_parser("list-zalo-apps")
+
+    probe_parser = subparsers.add_parser("probe")
+    probe_parser.add_argument("--zalo-pid", type=int)
+    probe_parser.add_argument("--zalo-path")
 
     open_chat_parser = subparsers.add_parser("open-chat")
     open_chat_parser.add_argument("--recipient", required=True)
+    open_chat_parser.add_argument("--zalo-pid", type=int)
+    open_chat_parser.add_argument("--zalo-path")
 
     validate_parser = subparsers.add_parser("validate-config")
     validate_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -331,6 +379,8 @@ def main() -> int:
     send_parser.add_argument("--recipient", required=True)
     send_parser.add_argument("--message")
     send_parser.add_argument("--image", action="append", default=[])
+    send_parser.add_argument("--zalo-pid", type=int)
+    send_parser.add_argument("--zalo-path")
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -349,11 +399,14 @@ def main() -> int:
     if args.command == "request-accessibility":
         return accessibility_status(prompt=True)
 
+    if args.command == "list-zalo-apps":
+        return list_zalo_apps()
+
     if args.command == "probe":
-        return probe()
+        return probe(args.zalo_pid, args.zalo_path)
 
     if args.command == "open-chat":
-        return open_chat(args.recipient)
+        return open_chat(args.recipient, args.zalo_pid, args.zalo_path)
 
     if args.command == "validate-config":
         config = load_json(args.config)
@@ -362,7 +415,7 @@ def main() -> int:
         return 0
 
     if args.command == "send-now":
-        return send_now(args.recipient, args.message, args.image)
+        return send_now(args.recipient, args.message, args.image, args.zalo_pid, args.zalo_path)
 
     if args.command == "run":
         return run_scheduler(args.config, args.state, args.poll_seconds)
