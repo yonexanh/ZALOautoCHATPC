@@ -567,6 +567,7 @@ final class LauncherModel: ObservableObject {
             let searchField: Element?
             let messageInput: Element?
             let imageButton: Element?
+            let attachmentButton: Element?
         }
 
         do {
@@ -577,6 +578,7 @@ final class LauncherModel: ObservableObject {
             search=\(probe.searchField?.role ?? "-")
             input=\(probe.messageInput?.value ?? "-")
             image=\(probe.imageButton?.value ?? "-")
+            file=\(probe.attachmentButton?.value ?? "-")
             """
         } catch {
             statusSummary = "Probe có output nhưng parse JSON lỗi."
@@ -864,7 +866,12 @@ final class LauncherModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var model = LauncherModel()
-    private let zaloBlue = Color(red: 0.0, green: 0.48, blue: 1.0)
+    private let brandPrimary = Color(red: 0.00, green: 0.62, blue: 0.55)
+    private let brandPrimarySoft = Color(red: 0.00, green: 0.62, blue: 0.55).opacity(0.14)
+    private let brandAccent = Color(red: 0.94, green: 0.40, blue: 0.30)
+    private let successGreen = Color(red: 0.12, green: 0.68, blue: 0.36)
+    private let warningOrange = Color(red: 0.91, green: 0.56, blue: 0.18)
+    private let panelRadius: CGFloat = 8
 
     var body: some View {
         VStack(spacing: 0) {
@@ -877,7 +884,7 @@ struct ContentView: View {
                         accessibilityCard
                         advancedCard
                     }
-                    .frame(width: 380)
+                    .frame(width: 360)
 
                     VStack(alignment: .leading, spacing: 14) {
                         scheduleConfigCard
@@ -886,23 +893,31 @@ struct ContentView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .padding(18)
+                .padding(20)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .tint(zaloBlue)
+        .background(appBackground)
+        .tint(brandPrimary)
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
-            Image(systemName: "paperplane.circle.fill")
-                .font(.system(size: 40, weight: .semibold))
-                .foregroundStyle(zaloBlue)
+            ZStack {
+                Circle()
+                    .fill(brandPrimary)
+                    .frame(width: 48, height: 48)
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Zalo Scheduler")
-                    .font(.system(size: 28, weight: .semibold))
-                Text("Tạo lịch gửi Zalo bằng biểu mẫu, kèm tin nhắn và ảnh/video.")
+                HStack(spacing: 10) {
+                    Text("Zalo Scheduler")
+                        .font(.system(size: 27, weight: .semibold))
+                    statusPill(appVersionText, systemImage: "tag.fill", color: brandPrimary)
+                }
+                Text("Thiết lập lịch gửi rõ ràng, kiểm tra nhanh, vận hành ít thao tác.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -918,16 +933,21 @@ struct ContentView: View {
                     .lineLimit(1)
             }
 
-            statusPill(appVersionText, systemImage: "tag.fill", color: zaloBlue)
-
             statusPill(
                 model.schedulerRunning ? "Đang chạy" : "Đang dừng",
                 systemImage: model.schedulerRunning ? "play.fill" : "pause.fill",
-                color: model.schedulerRunning ? .green : .orange
+                color: model.schedulerRunning ? successGreen : warningOrange
+            )
+
+            statusPill(
+                accessibilityTitle,
+                systemImage: accessibilityIcon,
+                color: accessibilityColor
             )
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, 24)
         .padding(.vertical, 16)
+        .background(headerBackground)
     }
 
     private var appVersionText: String {
@@ -936,33 +956,42 @@ struct ContentView: View {
         return "Phiên bản \(version) (\(build))"
     }
 
+    private var appBackground: Color {
+        Color(nsColor: .windowBackgroundColor)
+    }
+
+    private var panelBackground: Color {
+        Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var fieldBackground: Color {
+        Color(nsColor: .textBackgroundColor)
+    }
+
+    private var headerBackground: Color {
+        Color(nsColor: .controlBackgroundColor).opacity(0.72)
+    }
+
     private var schedulerCard: some View {
-        panel("Scheduler", systemImage: "clock.badge.checkmark") {
+        panel("Điều khiển", systemImage: "slider.horizontal.3") {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    metricTile(
-                        title: "Lịch gửi",
-                        value: model.schedulerRunning ? "Đang chạy" : "Đang dừng",
-                        systemImage: model.schedulerRunning ? "checkmark.circle.fill" : "pause.circle.fill",
-                        color: model.schedulerRunning ? .green : .orange
-                    )
-                    metricTile(
-                        title: "Đã tạo",
-                        value: "\(model.jobs.count) lịch",
-                        systemImage: "calendar.badge.clock",
-                        color: zaloBlue
-                    )
+                statusBanner(
+                    title: model.schedulerRunning ? "Lịch tự động đang chạy" : "Lịch tự động đang dừng",
+                    detail: "\(model.jobs.count) lịch trong cấu hình hiện tại",
+                    systemImage: model.schedulerRunning ? "checkmark.circle.fill" : "pause.circle.fill",
+                    color: model.schedulerRunning ? successGreen : warningOrange
+                )
+
+                Button {
+                    model.startScheduler()
+                } label: {
+                    Label("Bắt đầu chạy lịch", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.schedulerRunning || model.currentTask != nil)
 
                 HStack(spacing: 10) {
-                    Button {
-                        model.startScheduler()
-                    } label: {
-                        Label("Bắt đầu", systemImage: "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.schedulerRunning)
-
                     Button {
                         model.stopScheduler()
                     } label: {
@@ -984,7 +1013,7 @@ struct ContentView: View {
     }
 
     private var accessibilityCard: some View {
-        panel("Accessibility", systemImage: "hand.raised.fill") {
+        panel("Quyền điều khiển", systemImage: "hand.raised.fill") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: accessibilityIcon)
@@ -1029,7 +1058,7 @@ struct ContentView: View {
     }
 
     private var advancedCard: some View {
-        panel("Nâng cao", systemImage: "wrench.and.screwdriver.fill") {
+        panel("Công cụ", systemImage: "wrench.and.screwdriver.fill") {
             VStack(alignment: .leading, spacing: 12) {
                 DisclosureGroup {
                     VStack(alignment: .leading, spacing: 12) {
@@ -1071,8 +1100,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
                             .padding(10)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .background(fieldBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+                            .overlay(panelStroke)
 
                         HStack(spacing: 10) {
                             Button {
@@ -1099,72 +1129,92 @@ struct ContentView: View {
     }
 
     private var scheduleConfigCard: some View {
-        panel("Lịch gửi", systemImage: "calendar.badge.clock") {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 10) {
-                    Button {
-                        model.addJob()
-                    } label: {
-                        Label("Thêm lịch", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderedProminent)
+        panel("Cấu hình lịch gửi", systemImage: "calendar.badge.clock") {
+            VStack(alignment: .leading, spacing: 16) {
+                scheduleToolbar
 
-                    Button {
-                        model.duplicateSelectedJob()
-                    } label: {
-                        Label("Nhân bản", systemImage: "plus.square.on.square")
-                    }
-                    .disabled(model.selectedJobID == nil)
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Danh sách lịch")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("\(model.jobs.count)")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(brandPrimary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(brandPrimarySoft)
+                                .clipShape(Capsule())
+                        }
 
-                    Button {
-                        model.deleteSelectedJob()
-                    } label: {
-                        Label("Xóa", systemImage: "trash")
-                    }
-                    .disabled(model.jobs.count <= 1)
-
-                    Spacer()
-
-                    Text(model.configSummary)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Button {
-                        model.loadConfigFromDisk()
-                    } label: {
-                        Label("Tải lại", systemImage: "arrow.clockwise")
-                    }
-
-                    Button {
-                        model.saveConfigFromForm()
-                    } label: {
-                        Label("Lưu lịch", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .disabled(model.currentTask != nil)
-
-                HStack(alignment: .top, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.jobs) { job in
-                            jobRow(job)
+                        VStack(spacing: 8) {
+                            ForEach(model.jobs) { job in
+                                jobRow(job)
+                            }
                         }
                     }
-                    .frame(width: 260)
-
-                    Divider()
+                    .padding(12)
+                    .frame(width: 280)
+                    .background(fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+                    .overlay(panelStroke)
 
                     if let index = model.jobs.firstIndex(where: { $0.id == model.selectedJobID }) {
                         jobEditor(job: $model.jobs[index])
                     } else {
-                        Text("Chưa chọn lịch gửi.")
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, minHeight: 360, alignment: .center)
+                        emptyState("Chưa chọn lịch gửi", systemImage: "calendar.badge.exclamationmark")
+                            .frame(maxWidth: .infinity, minHeight: 360)
                     }
                 }
             }
         }
+    }
+
+    private var scheduleToolbar: some View {
+        HStack(spacing: 10) {
+            Button {
+                model.addJob()
+            } label: {
+                Label("Thêm lịch", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                model.duplicateSelectedJob()
+            } label: {
+                Label("Nhân bản", systemImage: "plus.square.on.square")
+            }
+            .disabled(model.selectedJobID == nil)
+
+            Button {
+                model.deleteSelectedJob()
+            } label: {
+                Label("Xóa", systemImage: "trash")
+            }
+            .disabled(model.jobs.count <= 1)
+
+            Spacer()
+
+            Label(model.configSummary, systemImage: "checkmark.seal")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Button {
+                model.loadConfigFromDisk()
+            } label: {
+                Label("Tải lại", systemImage: "arrow.clockwise")
+            }
+
+            Button {
+                model.saveConfigFromForm()
+            } label: {
+                Label("Lưu lịch", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .disabled(model.currentTask != nil)
     }
 
     private func jobRow(_ job: ScheduleJob) -> some View {
@@ -1176,7 +1226,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Image(systemName: type.systemImage)
-                        .foregroundStyle(isSelected ? .white : zaloBlue)
+                        .foregroundStyle(isSelected ? .white : brandPrimary)
                         .frame(width: 18)
                     Text(job.recipient.isEmpty ? "Chưa có người nhận" : job.recipient)
                         .font(.subheadline.weight(.semibold))
@@ -1196,12 +1246,12 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
             }
-            .padding(11)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? zaloBlue : Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(isSelected ? brandPrimary : panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
                     .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.14), lineWidth: 1)
             )
         }
@@ -1210,6 +1260,8 @@ struct ContentView: View {
 
     private func jobEditor(job: Binding<ScheduleJob>) -> some View {
         VStack(alignment: .leading, spacing: 14) {
+            selectedJobHeader(job.wrappedValue)
+
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 field("Người nhận") {
                     TextField("Tên đúng như Zalo", text: job.recipient)
@@ -1231,60 +1283,18 @@ struct ContentView: View {
                 .frame(width: 250)
             }
 
-            field("Tin nhắn") {
-                plainEditor(text: job.message, minHeight: 96)
+            sectionBox("Nội dung gửi", systemImage: "text.bubble") {
+                field("Tin nhắn") {
+                    plainEditor(text: job.message, minHeight: 110)
+                }
             }
 
-            scheduleEditor(job: job)
+            sectionBox("Thời gian gửi", systemImage: "clock") {
+                scheduleEditor(job: job)
+            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Ảnh/video đính kèm")
-                        .font(.subheadline.weight(.medium))
-                    Spacer()
-                    Button {
-                        model.chooseImages(for: job.wrappedValue.id)
-                    } label: {
-                        Label("Thêm ảnh/video", systemImage: "photo.on.rectangle")
-                    }
-                }
-
-                if job.wrappedValue.images.isEmpty {
-                    emptyState("Chưa chọn ảnh/video", systemImage: "photo.on.rectangle")
-                } else {
-                    VStack(spacing: 6) {
-                        ForEach(job.wrappedValue.images, id: \.self) { imagePath in
-                            let mediaKind = LauncherModel.mediaKind(for: imagePath)
-                            HStack(spacing: 8) {
-                                Image(systemName: mediaKind.systemImage)
-                                    .foregroundStyle(zaloBlue)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(URL(fileURLWithPath: imagePath).lastPathComponent)
-                                        .font(.subheadline.weight(.medium))
-                                        .lineLimit(1)
-                                    Text(mediaKind.title)
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(zaloBlue)
-                                    Text(imagePath)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                                Spacer()
-                                Button {
-                                    model.removeImage(imagePath, from: job.wrappedValue.id)
-                                } label: {
-                                    Image(systemName: "xmark")
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                            .padding(9)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        }
-                    }
-                }
+            sectionBox("Ảnh/video đính kèm", systemImage: "photo.on.rectangle") {
+                mediaAttachmentEditor(job: job)
             }
 
             HStack {
@@ -1298,7 +1308,65 @@ struct ContentView: View {
                 .disabled(model.currentTask != nil)
             }
         }
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
+    }
+
+    private func selectedJobHeader(_ job: ScheduleJob) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(brandPrimarySoft)
+                    .frame(width: 42, height: 42)
+                Image(systemName: (ScheduleType(rawValue: job.schedule.type) ?? .daily).systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(brandPrimary)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(job.recipient.isEmpty ? "Lịch gửi chưa đặt tên" : job.recipient)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+                Text(scheduleSummary(for: job))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            statusPill(job.message.isEmpty ? "Chưa có tin nhắn" : "Có tin nhắn", systemImage: "text.bubble", color: job.message.isEmpty ? warningOrange : brandPrimary)
+            statusPill("\(job.images.count) tệp", systemImage: "paperclip", color: brandAccent)
+        }
+        .padding(.bottom, 2)
+    }
+
+    private func mediaAttachmentEditor(job: Binding<ScheduleJob>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Spacer()
+                    Button {
+                        model.chooseImages(for: job.wrappedValue.id)
+                    } label: {
+                        Label("Thêm ảnh/video", systemImage: "photo.on.rectangle")
+                    }
+                }
+
+                if job.wrappedValue.images.isEmpty {
+                    emptyState("Chưa chọn ảnh/video", systemImage: "photo.on.rectangle")
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(job.wrappedValue.images, id: \.self) { imagePath in
+                            mediaRow(imagePath: imagePath, showPath: true) {
+                                model.removeImage(imagePath, from: job.wrappedValue.id)
+                            }
+                        }
+                    }
+                }
+            }
     }
 
     private func scheduleEditor(job: Binding<ScheduleJob>) -> some View {
@@ -1318,9 +1386,7 @@ struct ContentView: View {
                     .frame(width: 330)
             }
         }
-        .padding(12)
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.top, 2)
     }
 
     private func dayToggleRow(job: Binding<ScheduleJob>) -> some View {
@@ -1339,10 +1405,14 @@ struct ContentView: View {
                 } label: {
                     Text(title)
                         .font(.caption.weight(.semibold))
-                        .frame(width: 30, height: 26)
+                        .frame(width: 32, height: 28)
                         .foregroundStyle(isOn ? .white : .primary)
-                        .background(isOn ? zaloBlue : Color(nsColor: .controlBackgroundColor))
+                        .background(isOn ? brandPrimary : fieldBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(isOn ? Color.clear : Color.secondary.opacity(0.14), lineWidth: 1)
+                        )
                 }
                 .buttonStyle(.plain)
             }
@@ -1358,8 +1428,9 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
                     .padding(10)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+                    .overlay(panelStroke)
 
                 HStack(spacing: 10) {
                     Button {
@@ -1383,59 +1454,37 @@ struct ContentView: View {
     private var testCard: some View {
         panel("Gửi thử", systemImage: "paperplane.fill") {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Người nhận")
-                        .font(.subheadline.weight(.medium))
-                    TextField("Tên hoặc số điện thoại trong Zalo", text: $model.recipient)
-                        .textFieldStyle(.roundedBorder)
-                }
+                HStack(alignment: .top, spacing: 12) {
+                    field("Người nhận") {
+                        TextField("Tên hoặc số điện thoại trong Zalo", text: $model.recipient)
+                            .textFieldStyle(.roundedBorder)
+                    }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Tin nhắn")
-                        .font(.subheadline.weight(.medium))
-                    editor(text: $model.message, minHeight: 118)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Ảnh/video đính kèm")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Tệp test")
                             .font(.subheadline.weight(.medium))
-                        Spacer()
                         Button {
                             model.chooseImages()
                         } label: {
                             Label("Chọn ảnh/video", systemImage: "photo.on.rectangle")
                         }
                     }
+                    .frame(width: 160, alignment: .leading)
+                }
 
+                sectionBox("Tin nhắn test", systemImage: "text.bubble") {
+                    editor(text: $model.message, minHeight: 118)
+                }
+
+                sectionBox("Ảnh/video test", systemImage: "paperclip") {
                     if model.testImagePaths.isEmpty {
                         emptyState("Chưa chọn ảnh/video", systemImage: "photo.on.rectangle")
                     } else {
                         VStack(spacing: 6) {
                             ForEach(model.testImagePaths, id: \.self) { imagePath in
-                                let mediaKind = LauncherModel.mediaKind(for: imagePath)
-                                HStack(spacing: 8) {
-                                    Image(systemName: mediaKind.systemImage)
-                                        .foregroundStyle(zaloBlue)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(URL(fileURLWithPath: imagePath).lastPathComponent)
-                                            .font(.subheadline.weight(.medium))
-                                            .lineLimit(1)
-                                        Text(mediaKind.title)
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(zaloBlue)
-                                    }
-                                    Spacer()
-                                    Button {
-                                        model.removeTestImage(imagePath)
-                                    } label: {
-                                        Image(systemName: "xmark")
-                                    }
-                                    .buttonStyle(.borderless)
+                                mediaRow(imagePath: imagePath, showPath: false) {
+                                    model.removeTestImage(imagePath)
                                 }
-                                .padding(9)
-                                .background(Color(nsColor: .textBackgroundColor))
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
                         }
                     }
@@ -1459,7 +1508,7 @@ struct ContentView: View {
 
                     Label("Gửi ngay sẽ gửi thật vào Zalo", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(warningOrange)
                 }
                 .disabled(model.currentTask != nil)
             }
@@ -1467,7 +1516,7 @@ struct ContentView: View {
     }
 
     private var logCard: some View {
-        panel("Console", systemImage: "terminal.fill") {
+        panel("Nhật ký", systemImage: "terminal.fill") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     Button {
@@ -1496,8 +1545,9 @@ struct ContentView: View {
                         .padding(12)
                 }
                 .frame(minHeight: 260)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+                .overlay(panelStroke)
             }
         }
     }
@@ -1591,8 +1641,9 @@ struct ContentView: View {
         .font(.subheadline)
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, minHeight: 42)
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
     }
 
     private var pythonDisplayName: String {
@@ -1624,60 +1675,133 @@ struct ContentView: View {
     private var accessibilityColor: Color {
         switch model.accessibilityTrusted {
         case .some(true):
-            return .green
+            return successGreen
         case .some(false):
-            return .orange
+            return warningOrange
         case .none:
             return .secondary
         }
     }
 
     private func panel<Content: View>(_ title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(brandPrimary)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.headline)
+                Spacer(minLength: 0)
+            }
             content()
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-        )
+        .background(panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
     }
 
     private func statusPill(_ title: String, systemImage: String, color: Color) -> some View {
         Label(title, systemImage: systemImage)
-            .font(.subheadline.weight(.semibold))
+            .font(.caption.weight(.semibold))
             .foregroundStyle(color)
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
             .background(color.opacity(0.12))
             .clipShape(Capsule())
     }
 
-    private func metricTile(title: String, value: String, systemImage: String, color: Color) -> some View {
-        HStack(spacing: 10) {
+    private var panelStroke: some View {
+        RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
+            .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+    }
+
+    private func statusBanner(title: String, detail: String, systemImage: String, color: Color) -> some View {
+        HStack(spacing: 12) {
             Image(systemName: systemImage)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(color)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
+                .frame(width: 42, height: 42)
+                .background(color.opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(value)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
+
             Spacer(minLength: 0)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 64)
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
+    }
+
+    private func sectionBox<Content: View>(
+        _ title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
+    }
+
+    private func mediaRow(imagePath: String, showPath: Bool, onRemove: @escaping () -> Void) -> some View {
+        let mediaKind = LauncherModel.mediaKind(for: imagePath)
+        return HStack(spacing: 10) {
+            Image(systemName: mediaKind.systemImage)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(brandPrimary)
+                .frame(width: 30, height: 30)
+                .background(brandPrimarySoft)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(URL(fileURLWithPath: imagePath).lastPathComponent)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(mediaKind.title)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(brandPrimary)
+                    if showPath {
+                        Text(imagePath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(9)
+        .background(fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay(panelStroke)
     }
 
     private func pathBlock(title: String, value: String) -> some View {
@@ -1692,8 +1816,9 @@ struct ContentView: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+                .overlay(panelStroke)
         }
     }
 
@@ -1703,12 +1828,9 @@ struct ContentView: View {
             .scrollContentBackground(.hidden)
             .padding(6)
             .frame(minHeight: minHeight)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-            )
+            .background(fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+            .overlay(panelStroke)
     }
 
     private func plainEditor(text: Binding<String>, minHeight: CGFloat) -> some View {
@@ -1717,11 +1839,8 @@ struct ContentView: View {
             .scrollContentBackground(.hidden)
             .padding(6)
             .frame(minHeight: minHeight)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-            )
+            .background(fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+            .overlay(panelStroke)
     }
 }

@@ -38,6 +38,7 @@ struct ProbeResult: Codable {
     let searchField: ElementInfo?
     let messageInput: ElementInfo?
     let imageButton: ElementInfo?
+    let attachmentButton: ElementInfo?
 }
 
 struct AccessibilityTrustReport: Codable {
@@ -92,7 +93,8 @@ final class ZaloAutomation {
                 focusedWindowTitle: "",
                 searchField: nil,
                 messageInput: nil,
-                imageButton: nil
+                imageButton: nil,
+                attachmentButton: nil
             )
         }
 
@@ -105,7 +107,8 @@ final class ZaloAutomation {
             focusedWindowTitle: stringAttribute(kAXTitleAttribute, of: window) ?? "",
             searchField: bestSearchField(in: all).map(info(for:)),
             messageInput: bestProbeMessageInput(in: all).map(info(for:)),
-            imageButton: bestImageButton(in: all).map(info(for:))
+            imageButton: bestImageButton(in: all).map(info(for:)),
+            attachmentButton: bestAttachmentButton(in: all).map(info(for:))
         )
     }
 
@@ -207,18 +210,26 @@ final class ZaloAutomation {
 
     private func attachFileWithOpenPanel(at filePath: String, app: NSRunningApplication) throws {
         let window = try mainWindow(for: app)
-        let elements = try interactiveDescendants(of: window)
-        if let button = bestAttachmentButton(in: elements) {
-            try click(element: button)
+        var clickedFileMenuItem = false
+        if let existingFileMenuItem = try waitForZaloElement(timeoutSeconds: 0.2, matching: isChooseFileMenuItem) {
+            try click(element: existingFileMenuItem)
+            clickedFileMenuItem = true
         } else {
-            try clickAttachmentButtonByPosition(in: window)
+            let elements = try interactiveDescendants(of: window)
+            if let button = bestAttachmentButton(in: elements) {
+                try click(element: button)
+            } else {
+                try clickAttachmentButtonByPosition(in: window)
+            }
+            usleep(300_000)
         }
-        usleep(300_000)
 
-        if let fileMenuItem = try waitForZaloElement(timeoutSeconds: 2.0, matching: isChooseFileMenuItem) {
-            try click(element: fileMenuItem)
-        } else {
-            try clickChooseFileMenuByPosition(in: window)
+        if !clickedFileMenuItem {
+            if let fileMenuItem = try waitForZaloElement(timeoutSeconds: 2.0, matching: isChooseFileMenuItem) {
+                try click(element: fileMenuItem)
+            } else {
+                try clickChooseFileMenuByPosition(in: window)
+            }
         }
         usleep(500_000)
 
@@ -375,6 +386,7 @@ final class ZaloAutomation {
         bestSearchField(in: elements) != nil
             || bestProbeMessageInput(in: elements) != nil
             || bestImageButton(in: elements) != nil
+            || bestAttachmentButton(in: elements) != nil
     }
 
     private func wakeZaloWebView(in window: AXUIElement) throws {
@@ -466,28 +478,39 @@ final class ZaloAutomation {
     }
 
     private func bestImageButton(in elements: [AXUIElement]) -> AXUIElement? {
-        elements.first { element in
-            let labelText = label(for: element) ?? ""
-            guard labelText.localizedCaseInsensitiveContains("Gửi hình ảnh") else {
-                return false
-            }
-            return actions(of: element).contains(kAXPressAction as String) || hasPressAncestor(element)
-        }
+        bestLabeledClickTarget(
+            in: elements,
+            matching: { self.normalize($0).contains("gui hinh anh") }
+        )
     }
 
     private func bestAttachmentButton(in elements: [AXUIElement]) -> AXUIElement? {
-        elements.first { element in
-            let normalizedLabel = normalize(label(for: element) ?? "")
-            guard normalizedLabel.contains("dinh kem file") || normalizedLabel.contains("chon file") else {
-                return false
-            }
-            return actions(of: element).contains(kAXPressAction as String) || hasPressAncestor(element)
-        }
+        bestLabeledClickTarget(
+            in: elements,
+            matching: { self.normalize($0).contains("dinh kem file") }
+        )
     }
 
     private func isChooseFileMenuItem(_ element: AXUIElement) -> Bool {
         let normalizedLabel = normalize(label(for: element) ?? "")
         return normalizedLabel == "chon file" || normalizedLabel.contains("chon file")
+    }
+
+    private func bestLabeledClickTarget(
+        in elements: [AXUIElement],
+        matching predicate: (String) -> Bool
+    ) -> AXUIElement? {
+        let matches = elements.filter { element in
+            guard let labelText = label(for: element), predicate(labelText) else {
+                return false
+            }
+            return position(of: element) != nil
+        }
+
+        if let directlyClickable = matches.first(where: { actions(of: $0).contains(kAXPressAction as String) }) {
+            return directlyClickable
+        }
+        return matches.first
     }
 
     private func hasPressAncestor(_ element: AXUIElement) -> Bool {
@@ -924,6 +947,9 @@ final class ZaloAutomation {
 
     private func normalize(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "vi_VN"))
+            .replacingOccurrences(of: "Đ", with: "D")
+            .replacingOccurrences(of: "đ", with: "d")
+            .lowercased()
             .replacingOccurrences(of: "\u{00A0}", with: " ")
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
