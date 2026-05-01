@@ -1,0 +1,27 @@
+{
+  "jobs": [
+    {
+      "id": "welcome-once",
+      "recipient": "Dũng Mập Địch",
+      "message": "Chào anh, em gửi thông tin như đã hẹn.",
+      "images": [
+        "/Users/mac/Pictures/sample-1.jpg"
+      ],
+      "schedule": {
+        "type": "once",
+        "at": "2026-05-01T18:30:00+07:00"
+      }
+    },
+    {
+      "id": "daily-reminder",
+      "recipient": "Mom",
+      "message": "Chúc cả nhà buổi sáng tốt lành.",
+      "images": [],
+      "schedule": {
+        "type": "daily",
+        "at": "08:15",
+        "days": [0, 1, 2, 3, 4, 5, 6]
+      }
+    }
+  ]
+}
