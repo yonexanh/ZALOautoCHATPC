@@ -869,6 +869,7 @@ struct ContentView: View {
     private let brandPrimary = Color(red: 0.00, green: 0.62, blue: 0.55)
     private let brandPrimarySoft = Color(red: 0.00, green: 0.62, blue: 0.55).opacity(0.14)
     private let brandAccent = Color(red: 0.94, green: 0.40, blue: 0.30)
+    private let warmAmber = Color(red: 0.96, green: 0.68, blue: 0.28)
     private let successGreen = Color(red: 0.12, green: 0.68, blue: 0.36)
     private let warningOrange = Color(red: 0.91, green: 0.56, blue: 0.18)
     private let panelRadius: CGFloat = 8
@@ -1136,7 +1137,7 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Danh sách lịch")
+                            Text("Khách hàng")
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                             Text("\(model.jobs.count)")
@@ -1155,7 +1156,7 @@ struct ContentView: View {
                         }
                     }
                     .padding(12)
-                    .frame(width: 280)
+                    .frame(width: 300)
                     .background(fieldBackground)
                     .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
                     .overlay(panelStroke)
@@ -1220,31 +1221,38 @@ struct ContentView: View {
     private func jobRow(_ job: ScheduleJob) -> some View {
         let isSelected = job.id == model.selectedJobID
         let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
+        let recipient = customerName(for: job)
         return Button {
             model.selectedJobID = job.id
         } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 8) {
-                    Image(systemName: type.systemImage)
-                        .foregroundStyle(isSelected ? .white : brandPrimary)
-                        .frame(width: 18)
-                    Text(job.recipient.isEmpty ? "Chưa có người nhận" : job.recipient)
-                        .font(.subheadline.weight(.semibold))
+            HStack(alignment: .top, spacing: 11) {
+                customerAvatar(name: recipient, size: 38, selected: isSelected)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Text(recipient)
+                            .font(.system(size: 16, weight: .semibold))
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Image(systemName: type.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(isSelected ? .white.opacity(0.86) : brandPrimary)
+                    }
+
+                    Text(scheduleSummary(for: job))
+                        .font(.caption)
+                        .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
                         .lineLimit(1)
-                    Spacer()
-                }
 
-                Text(scheduleSummary(for: job))
-                    .font(.caption)
-                    .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    Label(job.message.isEmpty ? "Không có tin nhắn" : "Có tin nhắn", systemImage: job.message.isEmpty ? "text.badge.xmark" : "text.bubble")
-                    Label("\(job.images.count) tệp", systemImage: "photo.on.rectangle")
+                    HStack(spacing: 6) {
+                        compactInfoChip(
+                            job.message.isEmpty ? "Chưa có tin" : "Có tin nhắn",
+                            systemImage: job.message.isEmpty ? "text.badge.xmark" : "text.bubble",
+                            selected: isSelected
+                        )
+                        compactInfoChip("\(job.images.count) tệp", systemImage: "paperclip", selected: isSelected)
+                    }
                 }
-                .font(.caption2)
-                .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1262,25 +1270,27 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             selectedJobHeader(job.wrappedValue)
 
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                field("Người nhận") {
-                    TextField("Tên đúng như Zalo", text: job.recipient)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Kiểu lịch")
-                        .font(.subheadline.weight(.medium))
-                    Picker("Kiểu lịch", selection: scheduleTypeBinding(for: job)) {
-                        ForEach(ScheduleType.allCases) { type in
-                            Label(type.title, systemImage: type.systemImage)
-                                .tag(type)
-                        }
+            sectionBox("Thông tin khách hàng", systemImage: "person.crop.circle") {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    field("Tên khách hàng") {
+                        TextField("Tên đúng như Zalo", text: job.recipient)
+                            .textFieldStyle(.roundedBorder)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Kiểu lịch")
+                            .font(.subheadline.weight(.medium))
+                        Picker("Kiểu lịch", selection: scheduleTypeBinding(for: job)) {
+                            ForEach(ScheduleType.allCases) { type in
+                                Label(type.title, systemImage: type.systemImage)
+                                    .tag(type)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                    }
+                    .frame(width: 250)
                 }
-                .frame(width: 250)
             }
 
             sectionBox("Nội dung gửi", systemImage: "text.bubble") {
@@ -1316,32 +1326,41 @@ struct ContentView: View {
     }
 
     private func selectedJobHeader(_ job: ScheduleJob) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(brandPrimarySoft)
-                    .frame(width: 42, height: 42)
-                Image(systemName: (ScheduleType(rawValue: job.schedule.type) ?? .daily).systemImage)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(brandPrimary)
-            }
+        let recipient = customerName(for: job)
+        return HStack(alignment: .center, spacing: 16) {
+            customerAvatar(name: recipient, size: 68, selected: true)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(job.recipient.isEmpty ? "Lịch gửi chưa đặt tên" : job.recipient)
-                    .font(.title3.weight(.semibold))
+                Text("KHÁCH HÀNG")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.76))
+                Text(recipient)
+                    .font(.system(size: 31, weight: .bold))
                     .lineLimit(1)
                 Text(scheduleSummary(for: job))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.84))
                     .lineLimit(1)
             }
 
             Spacer()
 
-            statusPill(job.message.isEmpty ? "Chưa có tin nhắn" : "Có tin nhắn", systemImage: "text.bubble", color: job.message.isEmpty ? warningOrange : brandPrimary)
-            statusPill("\(job.images.count) tệp", systemImage: "paperclip", color: brandAccent)
+            VStack(alignment: .trailing, spacing: 8) {
+                heroChip(job.message.isEmpty ? "Chưa có tin nhắn" : "Có tin nhắn", systemImage: "text.bubble")
+                heroChip("\(job.images.count) tệp đính kèm", systemImage: "paperclip")
+            }
         }
-        .padding(.bottom, 2)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
+                .fill(brandPrimary)
+                .overlay(alignment: .trailing) {
+                    Rectangle()
+                        .fill(brandAccent.opacity(0.22))
+                        .frame(width: 110)
+                }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
     }
 
     private func mediaAttachmentEditor(job: Binding<ScheduleJob>) -> some View {
@@ -1715,6 +1734,61 @@ struct ContentView: View {
     private var panelStroke: some View {
         RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
             .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+    }
+
+    private func customerName(for job: ScheduleJob) -> String {
+        let name = job.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "Chưa có khách hàng" : name
+    }
+
+    private func customerInitials(_ name: String) -> String {
+        let words = name
+            .split(whereSeparator: { $0.isWhitespace || $0 == "-" || $0 == "_" })
+            .map(String.init)
+        let letters = words.prefix(2).compactMap { $0.first }.map { String($0) }
+        let initials = letters.joined().uppercased()
+        return initials.isEmpty ? "?" : initials
+    }
+
+    private func customerAvatar(name: String, size: CGFloat, selected: Bool) -> some View {
+        Text(customerInitials(name))
+            .font(.system(size: max(13, size * 0.34), weight: .bold))
+            .foregroundStyle(selected ? brandPrimary : .white)
+            .frame(width: size, height: size)
+            .background(
+                RoundedRectangle(cornerRadius: min(16, size * 0.24), style: .continuous)
+                    .fill(selected ? Color.white : brandPrimary)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: min(16, size * 0.24), style: .continuous)
+                    .stroke(selected ? Color.white.opacity(0.32) : brandPrimary.opacity(0.26), lineWidth: 1)
+            )
+    }
+
+    private func compactInfoChip(_ title: String, systemImage: String, selected: Bool) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption2.weight(.semibold))
+            .lineLimit(1)
+            .foregroundStyle(selected ? .white.opacity(0.9) : .secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(selected ? Color.white.opacity(0.15) : fieldBackground)
+            .clipShape(Capsule())
+    }
+
+    private func heroChip(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(warmAmber)
+            Text(title)
+                .lineLimit(1)
+        }
+        .font(.caption.weight(.bold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.15))
+        .clipShape(Capsule())
     }
 
     private func statusBanner(title: String, detail: String, systemImage: String, color: Color) -> some View {
