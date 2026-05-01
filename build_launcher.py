@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST_DIR = ROOT / "dist"
 APP_NAME = "ZaloSchedulerLauncher"
+APP_VERSION = "1.1.0"
+APP_BUILD = "2"
 APP_DIR = DIST_DIR / f"{APP_NAME}.app"
 CONTENTS_DIR = APP_DIR / "Contents"
 MACOS_DIR = CONTENTS_DIR / "MacOS"
@@ -47,9 +49,9 @@ def write_info_plist() -> None:
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>{APP_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>{APP_BUILD}</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

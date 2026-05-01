@@ -121,7 +121,7 @@ final class ZaloAutomation {
 
         if !request.images.isEmpty {
             for imagePath in request.images {
-                try attachImage(at: imagePath, app: app)
+                try attachMedia(at: imagePath, app: app)
             }
         }
 
@@ -177,10 +177,15 @@ final class ZaloAutomation {
         usleep(250_000)
     }
 
-    private func attachImage(at imagePath: String, app: NSRunningApplication) throws {
-        let standardizedPath = URL(fileURLWithPath: imagePath).standardizedFileURL.path
+    private func attachMedia(at mediaPath: String, app: NSRunningApplication) throws {
+        let standardizedPath = URL(fileURLWithPath: mediaPath).standardizedFileURL.path
         guard FileManager.default.fileExists(atPath: standardizedPath) else {
-            throw AutomationError.message("Không tìm thấy ảnh: \(standardizedPath)")
+            throw AutomationError.message("Không tìm thấy tệp media: \(standardizedPath)")
+        }
+
+        if shouldAttachAsFile(standardizedPath) {
+            try attachFileWithOpenPanel(at: standardizedPath, app: app)
+            return
         }
 
         do {
@@ -188,13 +193,41 @@ final class ZaloAutomation {
         } catch {
             let pickerError = automationErrorMessage(from: error)
             try dismissOpenPanelsIfPresent()
+            guard canReadImageFile(standardizedPath) else {
+                throw AutomationError.message("Không đính kèm được video/media. Picker: \(pickerError). Video cần được Zalo nhận qua hộp chọn file.")
+            }
             do {
                 try attachImageViaClipboard(at: standardizedPath, app: app)
             } catch {
                 let clipboardError = automationErrorMessage(from: error)
-                throw AutomationError.message("Không đính kèm được ảnh. Picker: \(pickerError). Clipboard: \(clipboardError)")
+                throw AutomationError.message("Không đính kèm được media. Picker: \(pickerError). Clipboard: \(clipboardError)")
             }
         }
+    }
+
+    private func attachFileWithOpenPanel(at filePath: String, app: NSRunningApplication) throws {
+        let window = try mainWindow(for: app)
+        let elements = try interactiveDescendants(of: window)
+        if let button = bestAttachmentButton(in: elements) {
+            try click(element: button)
+        } else {
+            try clickAttachmentButtonByPosition(in: window)
+        }
+        usleep(300_000)
+
+        if let fileMenuItem = try waitForZaloElement(timeoutSeconds: 2.0, matching: isChooseFileMenuItem) {
+            try click(element: fileMenuItem)
+        } else {
+            try clickChooseFileMenuByPosition(in: window)
+        }
+        usleep(500_000)
+
+        guard let openPanel = try waitForOpenPanel(timeoutSeconds: 4.0) else {
+            throw AutomationError.message("Không mở được hộp thoại chọn file.")
+        }
+        try focusOrClick(openPanel)
+        try choosePathInOpenPanel(filePath)
+        usleep(900_000)
     }
 
     private func attachImageWithOpenPanel(at imagePath: String, app: NSRunningApplication) throws {
@@ -213,10 +246,18 @@ final class ZaloAutomation {
         }
 
         guard let openPanel = try waitForOpenPanel(timeoutSeconds: 4.0) else {
-            throw AutomationError.message("Không mở được hộp thoại chọn ảnh.")
+            throw AutomationError.message("Không mở được hộp thoại chọn media.")
         }
         try focusOrClick(openPanel)
+        try choosePathInOpenPanel(imagePath)
+        usleep(900_000)
+    }
 
+    private func choosePathInOpenPanel(_ path: String) throws {
+        guard let openPanel = try waitForOpenPanel(timeoutSeconds: 1.0) else {
+            throw AutomationError.message("Không tìm thấy hộp thoại chọn file.")
+        }
+        try focusOrClick(openPanel)
         var gotoWindow: AXUIElement?
         for _ in 0..<3 {
             try pressKey(keyCode: 5, modifiers: [.maskCommand, .maskShift])
@@ -229,7 +270,7 @@ final class ZaloAutomation {
         }
 
         guard let gotoWindow else {
-            throw AutomationError.message("Không mở được hộp thoại nhập đường dẫn ảnh.")
+            throw AutomationError.message("Không mở được hộp thoại nhập đường dẫn media.")
         }
 
         let gotoField = try require(firstElement(
@@ -238,9 +279,9 @@ final class ZaloAutomation {
                     || self.role(of: element) == kAXTextFieldRole as String
             },
             in: descendants(of: gotoWindow)
-        ), "Không tìm thấy ô đường dẫn trong hộp thoại chọn ảnh.")
+        ), "Không tìm thấy ô đường dẫn trong hộp thoại chọn media.")
         try focusOrClick(gotoField)
-        try replaceFocusedText(with: imagePath)
+        try replaceFocusedText(with: path)
 
         try pressKey(keyCode: 36)
         usleep(450_000)
@@ -251,7 +292,6 @@ final class ZaloAutomation {
         } else {
             try pressKey(keyCode: 36)
         }
-        usleep(900_000)
     }
 
     private func attachImageViaClipboard(at imagePath: String, app: NSRunningApplication) throws {
@@ -283,6 +323,16 @@ final class ZaloAutomation {
 
         try pressKey(keyCode: 9, modifiers: [.maskCommand])
         usleep(1_000_000)
+    }
+
+    private func canReadImageFile(_ path: String) -> Bool {
+        NSImage(contentsOfFile: path) != nil
+    }
+
+    private func shouldAttachAsFile(_ path: String) -> Bool {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg"]
+        return videoExtensions.contains(ext)
     }
 
     private func refreshedMainWindow() throws -> AXUIElement {
@@ -359,6 +409,24 @@ final class ZaloAutomation {
         try click(at: point)
     }
 
+    private func clickAttachmentButtonByPosition(in window: AXUIElement) throws {
+        let frame = try windowFrame(window)
+        let point = CGPoint(
+            x: min(max(frame.minX + 505, frame.minX + frame.width * 0.54), frame.maxX - 170),
+            y: frame.maxY - 87
+        )
+        try click(at: point)
+    }
+
+    private func clickChooseFileMenuByPosition(in window: AXUIElement) throws {
+        let frame = try windowFrame(window)
+        let point = CGPoint(
+            x: min(max(frame.minX + 580, frame.minX + frame.width * 0.58), frame.maxX - 120),
+            y: frame.maxY - 215
+        )
+        try click(at: point)
+    }
+
     private func focusOrClick(_ element: AXUIElement) throws {
         if position(of: element) != nil {
             try click(element: element)
@@ -405,6 +473,21 @@ final class ZaloAutomation {
             }
             return actions(of: element).contains(kAXPressAction as String) || hasPressAncestor(element)
         }
+    }
+
+    private func bestAttachmentButton(in elements: [AXUIElement]) -> AXUIElement? {
+        elements.first { element in
+            let normalizedLabel = normalize(label(for: element) ?? "")
+            guard normalizedLabel.contains("dinh kem file") || normalizedLabel.contains("chon file") else {
+                return false
+            }
+            return actions(of: element).contains(kAXPressAction as String) || hasPressAncestor(element)
+        }
+    }
+
+    private func isChooseFileMenuItem(_ element: AXUIElement) -> Bool {
+        let normalizedLabel = normalize(label(for: element) ?? "")
+        return normalizedLabel == "chon file" || normalizedLabel.contains("chon file")
     }
 
     private func hasPressAncestor(_ element: AXUIElement) -> Bool {
@@ -468,6 +551,28 @@ final class ZaloAutomation {
     }
 
     private func waitForElement(
+        timeoutSeconds: Double,
+        matching predicate: @escaping (AXUIElement) -> Bool
+    ) throws -> AXUIElement? {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            guard let app = runningZaloApplication() else { break }
+            let appElement = AXUIElementCreateApplication(app.processIdentifier)
+            var roots = [appElement]
+            roots.append(contentsOf: copyElementArrayAttribute(kAXWindowsAttribute, of: appElement))
+            if let focusedWindow = copyElementAttribute(kAXFocusedWindowAttribute, of: appElement) {
+                roots.append(focusedWindow)
+            }
+
+            if let match = roots.lazy.flatMap({ self.descendants(of: $0) }).first(where: predicate) {
+                return match
+            }
+            usleep(100_000)
+        }
+        return nil
+    }
+
+    private func waitForZaloElement(
         timeoutSeconds: Double,
         matching predicate: @escaping (AXUIElement) -> Bool
     ) throws -> AXUIElement? {

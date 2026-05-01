@@ -202,16 +202,16 @@ def validate_config(config: dict[str, Any]) -> None:
         if images is None:
             images = []
         if not isinstance(images, list):
-            raise ValueError(f"Job {job['id']} có images phải là mảng.")
+            raise ValueError(f"Job {job['id']} có images phải là mảng đường dẫn ảnh/video.")
         for image in images:
             if not isinstance(image, str) or not image.strip():
-                raise ValueError(f"Job {job['id']} có đường dẫn ảnh không hợp lệ.")
+                raise ValueError(f"Job {job['id']} có đường dẫn ảnh/video không hợp lệ.")
 
         message = job.get("message")
         if message is not None and not isinstance(message, str):
             raise ValueError(f"Job {job['id']} có message phải là chuỗi.")
         if not message and not images:
-            raise ValueError(f"Job {job['id']} cần ít nhất message hoặc images.")
+            raise ValueError(f"Job {job['id']} cần ít nhất tin nhắn hoặc ảnh/video.")
 
         schedule = job["schedule"]
         if not isinstance(schedule, dict):

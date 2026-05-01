@@ -84,6 +84,29 @@ enum ScheduleType: String, CaseIterable, Identifiable {
     }
 }
 
+enum MediaKind {
+    case image
+    case video
+
+    var title: String {
+        switch self {
+        case .image:
+            return "ảnh"
+        case .video:
+            return "video"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .image:
+            return "photo"
+        case .video:
+            return "video"
+        }
+    }
+}
+
 struct SchedulerConfig: Codable {
     var jobs: [ScheduleJob]
 }
@@ -381,12 +404,12 @@ final class LauncherModel: ObservableObject {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.image]
+        panel.allowedContentTypes = Self.mediaContentTypes
 
         if panel.runModal() == .OK, let index = jobs.firstIndex(where: { $0.id == jobID }) {
             let selected = panel.urls.map(\.path)
             jobs[index].images.append(contentsOf: selected)
-            configSummary = "Đã thêm \(selected.count) ảnh vào lịch gửi."
+            configSummary = "Đã thêm \(selected.count) tệp ảnh/video vào lịch gửi."
         }
     }
 
@@ -395,7 +418,7 @@ final class LauncherModel: ObservableObject {
             return
         }
         jobs[index].images.removeAll { $0 == imagePath }
-        configSummary = "Đã xóa ảnh khỏi lịch gửi."
+        configSummary = "Đã xóa tệp khỏi lịch gửi."
     }
 
     private func normalizedJobsForSaving() throws -> [ScheduleJob] {
@@ -421,7 +444,7 @@ final class LauncherModel: ObservableObject {
                 throw ValidationMessage("Lịch \(offset + 1): thiếu người nhận.")
             }
             guard !job.message.isEmpty || !job.images.isEmpty else {
-                throw ValidationMessage("Lịch \(offset + 1): cần tin nhắn hoặc ảnh.")
+                throw ValidationMessage("Lịch \(offset + 1): cần tin nhắn hoặc ảnh/video.")
             }
 
             let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
@@ -464,14 +487,14 @@ final class LauncherModel: ObservableObject {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.image]
+        panel.allowedContentTypes = Self.mediaContentTypes
 
         if panel.runModal() == .OK {
             let selected = panel.urls.map(\.path)
             if !selected.isEmpty {
                 let existing = imagePaths()
                 imagePathsText = (existing + selected).joined(separator: "\n")
-                appendLog("Đã thêm \(selected.count) ảnh test.")
+                appendLog("Đã thêm \(selected.count) tệp ảnh/video test.")
             }
         }
     }
@@ -801,6 +824,16 @@ final class LauncherModel: ObservableObject {
         return formatter
     }
 
+    static var mediaContentTypes: [UTType] {
+        [.image, .movie]
+    }
+
+    static func mediaKind(for path: String) -> MediaKind {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg"]
+        return videoExtensions.contains(ext) ? .video : .image
+    }
+
     static func resolvePythonPath() -> String? {
         let candidates = [
             "/opt/homebrew/bin/python3",
@@ -831,6 +864,7 @@ final class LauncherModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var model = LauncherModel()
+    private let zaloBlue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -856,18 +890,19 @@ struct ContentView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .tint(zaloBlue)
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
             Image(systemName: "paperplane.circle.fill")
                 .font(.system(size: 40, weight: .semibold))
-                .foregroundStyle(.blue)
+                .foregroundStyle(zaloBlue)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Zalo Scheduler")
                     .font(.system(size: 28, weight: .semibold))
-                Text("Tạo lịch gửi Zalo bằng biểu mẫu, kèm tin nhắn và hình ảnh.")
+                Text("Tạo lịch gửi Zalo bằng biểu mẫu, kèm tin nhắn và ảnh/video.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -883,6 +918,8 @@ struct ContentView: View {
                     .lineLimit(1)
             }
 
+            statusPill(appVersionText, systemImage: "tag.fill", color: zaloBlue)
+
             statusPill(
                 model.schedulerRunning ? "Đang chạy" : "Đang dừng",
                 systemImage: model.schedulerRunning ? "play.fill" : "pause.fill",
@@ -891,6 +928,12 @@ struct ContentView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 16)
+    }
+
+    private var appVersionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        return "Phiên bản \(version) (\(build))"
     }
 
     private var schedulerCard: some View {
@@ -907,7 +950,7 @@ struct ContentView: View {
                         title: "Đã tạo",
                         value: "\(model.jobs.count) lịch",
                         systemImage: "calendar.badge.clock",
-                        color: .blue
+                        color: zaloBlue
                     )
                 }
 
@@ -1133,7 +1176,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Image(systemName: type.systemImage)
-                        .foregroundStyle(isSelected ? .white : .blue)
+                        .foregroundStyle(isSelected ? .white : zaloBlue)
                         .frame(width: 18)
                     Text(job.recipient.isEmpty ? "Chưa có người nhận" : job.recipient)
                         .font(.subheadline.weight(.semibold))
@@ -1148,14 +1191,14 @@ struct ContentView: View {
 
                 HStack(spacing: 8) {
                     Label(job.message.isEmpty ? "Không có tin nhắn" : "Có tin nhắn", systemImage: job.message.isEmpty ? "text.badge.xmark" : "text.bubble")
-                    Label("\(job.images.count) ảnh", systemImage: "photo")
+                    Label("\(job.images.count) tệp", systemImage: "photo.on.rectangle")
                 }
                 .font(.caption2)
                 .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
             }
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? Color.accentColor : Color(nsColor: .textBackgroundColor))
+            .background(isSelected ? zaloBlue : Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1196,28 +1239,32 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Ảnh đính kèm")
+                    Text("Ảnh/video đính kèm")
                         .font(.subheadline.weight(.medium))
                     Spacer()
                     Button {
                         model.chooseImages(for: job.wrappedValue.id)
                     } label: {
-                        Label("Thêm ảnh", systemImage: "photo.on.rectangle")
+                        Label("Thêm ảnh/video", systemImage: "photo.on.rectangle")
                     }
                 }
 
                 if job.wrappedValue.images.isEmpty {
-                    emptyState("Chưa chọn ảnh", systemImage: "photo")
+                    emptyState("Chưa chọn ảnh/video", systemImage: "photo.on.rectangle")
                 } else {
                     VStack(spacing: 6) {
                         ForEach(job.wrappedValue.images, id: \.self) { imagePath in
+                            let mediaKind = LauncherModel.mediaKind(for: imagePath)
                             HStack(spacing: 8) {
-                                Image(systemName: "photo")
-                                    .foregroundStyle(.blue)
+                                Image(systemName: mediaKind.systemImage)
+                                    .foregroundStyle(zaloBlue)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(URL(fileURLWithPath: imagePath).lastPathComponent)
                                         .font(.subheadline.weight(.medium))
                                         .lineLimit(1)
+                                    Text(mediaKind.title)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(zaloBlue)
                                     Text(imagePath)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -1294,7 +1341,7 @@ struct ContentView: View {
                         .font(.caption.weight(.semibold))
                         .frame(width: 30, height: 26)
                         .foregroundStyle(isOn ? .white : .primary)
-                        .background(isOn ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+                        .background(isOn ? zaloBlue : Color(nsColor: .controlBackgroundColor))
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
@@ -1351,27 +1398,33 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Ảnh đính kèm")
+                        Text("Ảnh/video đính kèm")
                             .font(.subheadline.weight(.medium))
                         Spacer()
                         Button {
                             model.chooseImages()
                         } label: {
-                            Label("Chọn ảnh", systemImage: "photo.on.rectangle")
+                            Label("Chọn ảnh/video", systemImage: "photo.on.rectangle")
                         }
                     }
 
                     if model.testImagePaths.isEmpty {
-                        emptyState("Chưa chọn ảnh", systemImage: "photo")
+                        emptyState("Chưa chọn ảnh/video", systemImage: "photo.on.rectangle")
                     } else {
                         VStack(spacing: 6) {
                             ForEach(model.testImagePaths, id: \.self) { imagePath in
+                                let mediaKind = LauncherModel.mediaKind(for: imagePath)
                                 HStack(spacing: 8) {
-                                    Image(systemName: "photo")
-                                        .foregroundStyle(.blue)
-                                    Text(URL(fileURLWithPath: imagePath).lastPathComponent)
-                                        .font(.subheadline.weight(.medium))
-                                        .lineLimit(1)
+                                    Image(systemName: mediaKind.systemImage)
+                                        .foregroundStyle(zaloBlue)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(URL(fileURLWithPath: imagePath).lastPathComponent)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(1)
+                                        Text(mediaKind.title)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(zaloBlue)
+                                    }
                                     Spacer()
                                     Button {
                                         model.removeTestImage(imagePath)
