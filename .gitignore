@@ -5,6 +5,7 @@ __pycache__/
 logs/
 build/
 dist/
+release/
 
 config/state.json
 config/config/

@@ -42,7 +42,7 @@ struct ProbeResult: Codable {
     let attachmentButton: ElementInfo?
 }
 
-struct ZaloApplicationInfo: Codable {
+struct ZaloApplicationInfo: Codable, Sendable {
     let pid: Int32
     let name: String
     let bundleIdentifier: String?
@@ -59,7 +59,7 @@ struct ZaloApplicationInfo: Codable {
     }
 }
 
-struct ZaloAppTarget: Codable, Equatable {
+struct ZaloAppTarget: Codable, Equatable, Sendable {
     var pid: Int32?
     var executablePath: String?
 }
@@ -72,7 +72,7 @@ struct AccessibilityTrustReport: Codable {
     let message: String
 }
 
-struct SendRequest {
+struct SendRequest: Sendable {
     let recipient: String
     let message: String?
     let images: [String]

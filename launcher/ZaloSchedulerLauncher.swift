@@ -136,6 +136,35 @@ struct JobSchedule: Codable, Equatable {
     var days: [Int]?
 }
 
+struct SchedulerState: Codable {
+    var jobs: [String: JobExecutionState] = [:]
+}
+
+struct JobExecutionState: Codable {
+    var lastOccurrenceKey: String?
+    var lastSuccessAt: String?
+    var lastErrorAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case lastOccurrenceKey = "last_occurrence_key"
+        case lastSuccessAt = "last_success_at"
+        case lastErrorAt = "last_error_at"
+    }
+}
+
+private struct DueScheduledJob {
+    let job: ScheduleJob
+    let occurrenceKey: String
+}
+
+private struct SchedulerSendResult {
+    let jobID: String
+    let recipient: String
+    let occurrenceKey: String
+    let success: Bool
+    let message: String
+}
+
 struct ValidationMessage: LocalizedError {
     let message: String
 
@@ -170,7 +199,12 @@ final class LauncherModel: ObservableObject {
     @Published var selectedZaloApp: ZaloAppTarget?
     @Published var selectedZaloSummary: String = "Chưa chọn Zalo gửi tin."
 
-    private var schedulerProcess: Process?
+    private var schedulerTimer: Timer?
+    private var schedulerBusy = false
+    private var schedulerGeneration = 0
+    private var activeSchedulerConfig: SchedulerConfig?
+    private var schedulerState = SchedulerState()
+    private let schedulerPollInterval: TimeInterval = 15
     private let fileManager = FileManager.default
 
     let resourceRoot: URL
@@ -187,11 +221,11 @@ final class LauncherModel: ObservableObject {
         self.configPath = defaultConfigPath.path
 
         bootstrapDataDirectory()
-        self.pythonPath = Self.resolvePythonPath() ?? "Không tìm thấy python3"
+        self.pythonPath = "Không cần Python khi chạy bằng app"
         appendLog("Resource root: \(resourceRoot.path)")
         appendLog("Data root: \(dataRoot.path)")
         appendLog("Config mặc định: \(configPath)")
-        appendLog("Python: \(pythonPath)")
+        appendLog("Runtime: app độc lập, scheduler chạy native trong ZaloSchedulerLauncher.")
         loadConfigFromDisk()
         checkAccessibilityStatus()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -200,11 +234,11 @@ final class LauncherModel: ObservableObject {
     }
 
     deinit {
-        schedulerProcess?.terminate()
+        schedulerTimer?.invalidate()
     }
 
     func buildHelper() {
-        runOneShot(label: "Build helper", arguments: ["build-helper"])
+        appendLog("Helper điều khiển Zalo đã được đóng gói sẵn trong app. Không cần build thêm trên máy mới.")
     }
 
     func checkAccessibilityStatus() {
@@ -235,7 +269,7 @@ final class LauncherModel: ObservableObject {
         guard saveConfigFromForm() else {
             return
         }
-        runOneShot(label: "Validate config", arguments: ["validate-config", "--config", configPath])
+        appendLog("Config hợp lệ. App có thể chạy lịch mà không cần Python/Swift trên máy mới.")
     }
 
     func openChat() {
@@ -265,7 +299,7 @@ final class LauncherModel: ObservableObject {
     }
 
     func startScheduler() {
-        guard schedulerProcess == nil else {
+        guard schedulerTimer == nil else {
             appendLog("Scheduler đang chạy.")
             return
         }
@@ -273,62 +307,148 @@ final class LauncherModel: ObservableObject {
             return
         }
 
-        guard let python = Self.resolvePythonPath() else {
-            appendLog("Không tìm thấy python3 để start scheduler.")
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [
-            resourceRoot.appendingPathComponent("main.py").path,
-            "run",
-            "--config", configPath,
-            "--state", statePath.path,
-        ]
-        process.environment = commandEnvironment()
-        process.currentDirectoryURL = dataRoot
-
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
-                return
-            }
-            Task { @MainActor in
-                self?.appendLog(text.trimmingCharacters(in: .newlines))
-            }
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            Task { @MainActor in
-                outputPipe.fileHandleForReading.readabilityHandler = nil
-                self?.schedulerProcess = nil
-                self?.schedulerRunning = false
-                self?.appendLog("Scheduler dừng với mã \(proc.terminationStatus).")
-            }
-        }
-
         do {
-            try process.run()
-            schedulerProcess = process
+            let config = SchedulerConfig(zaloApp: normalizedSelectedZaloApp(), jobs: jobs)
+            try validateSchedulerConfig(config)
+            schedulerState = try loadSchedulerState()
+            activeSchedulerConfig = config
+            schedulerGeneration += 1
             schedulerRunning = true
-            appendLog("Scheduler đã start với config: \(configPath)")
+            schedulerBusy = false
+            appendLog("Scheduler native đã start với config: \(configPath)")
+            appendLog("Máy mới chỉ cần mở app, cấp Accessibility và đăng nhập Zalo; không cần cài Python/Swift.")
+
+            let timer = Timer.scheduledTimer(withTimeInterval: schedulerPollInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.runSchedulerTick()
+                }
+            }
+            schedulerTimer = timer
+            runSchedulerTick()
         } catch {
             appendLog("Không thể start scheduler: \(error.localizedDescription)")
         }
     }
 
     func stopScheduler() {
-        guard let process = schedulerProcess else {
+        guard schedulerTimer != nil else {
             appendLog("Scheduler chưa chạy.")
             return
         }
-        process.terminate()
-        appendLog("Đã gửi tín hiệu dừng scheduler.")
+        schedulerTimer?.invalidate()
+        schedulerTimer = nil
+        activeSchedulerConfig = nil
+        schedulerGeneration += 1
+        schedulerRunning = false
+        appendLog("Scheduler đã dừng.")
+    }
+
+    private func runSchedulerTick() {
+        guard schedulerRunning, !schedulerBusy, let config = activeSchedulerConfig else {
+            return
+        }
+
+        let now = Date()
+        let dueJobs = config.jobs.compactMap { job -> DueScheduledJob? in
+            let jobState = schedulerState.jobs[job.id] ?? JobExecutionState()
+            return Self.dueScheduledJob(for: job, now: now, state: jobState)
+        }
+
+        guard !dueJobs.isEmpty else {
+            return
+        }
+
+        schedulerBusy = true
+        let generation = schedulerGeneration
+        let target = config.zaloApp
+        appendLog("Có \(dueJobs.count) lịch đến hạn. Bắt đầu gửi bằng app native.")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var results: [SchedulerSendResult] = []
+            for dueJob in dueJobs {
+                let job = dueJob.job
+                do {
+                    let request = SendRequest(
+                        recipient: job.recipient,
+                        message: job.message.isEmpty ? nil : job.message,
+                        images: job.images,
+                        zaloTarget: target
+                    )
+                    let automation = ZaloAutomation(target: target)
+                    try automation.send(request)
+                    results.append(
+                        SchedulerSendResult(
+                            jobID: job.id,
+                            recipient: job.recipient,
+                            occurrenceKey: dueJob.occurrenceKey,
+                            success: true,
+                            message: "Gửi thành công"
+                        )
+                    )
+                } catch {
+                    results.append(
+                        SchedulerSendResult(
+                            jobID: job.id,
+                            recipient: job.recipient,
+                            occurrenceKey: dueJob.occurrenceKey,
+                            success: false,
+                            message: automationErrorMessage(from: error)
+                        )
+                    )
+                }
+            }
+
+            DispatchQueue.main.async {
+                self?.finishSchedulerTick(results: results, generation: generation)
+            }
+        }
+    }
+
+    private func finishSchedulerTick(results: [SchedulerSendResult], generation: Int) {
+        let timestamp = Self.localTimestamp(Date())
+
+        for result in results {
+            var state = schedulerState.jobs[result.jobID] ?? JobExecutionState()
+            if result.success {
+                state.lastOccurrenceKey = result.occurrenceKey
+                state.lastSuccessAt = timestamp
+                appendLog("Gửi thành công job=\(result.jobID) recipient=\(result.recipient)")
+            } else {
+                state.lastErrorAt = timestamp
+                appendLog("Gửi thất bại job=\(result.jobID) recipient=\(result.recipient): \(result.message)")
+            }
+            schedulerState.jobs[result.jobID] = state
+        }
+
+        saveSchedulerState()
+        schedulerBusy = false
+
+        if schedulerRunning && generation == schedulerGeneration {
+            appendLog("Scheduler đang chờ lần kiểm tra tiếp theo.")
+        }
+    }
+
+    private func loadSchedulerState() throws -> SchedulerState {
+        guard fileManager.fileExists(atPath: statePath.path) else {
+            return SchedulerState()
+        }
+        let data = try Data(contentsOf: statePath)
+        if data.isEmpty {
+            return SchedulerState()
+        }
+        return try JSONDecoder().decode(SchedulerState.self, from: data)
+    }
+
+    private func saveSchedulerState() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(schedulerState)
+            try fileManager.createDirectory(at: statePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: statePath, options: .atomic)
+        } catch {
+            appendLog("Không lưu được state scheduler: \(error.localizedDescription)")
+        }
     }
 
     func loadConfigFromDisk() {
@@ -480,6 +600,42 @@ final class LauncherModel: ObservableObject {
             }
 
             return job
+        }
+    }
+
+    private func validateSchedulerConfig(_ config: SchedulerConfig) throws {
+        guard !config.jobs.isEmpty else {
+            throw ValidationMessage("Cần ít nhất một lịch gửi.")
+        }
+
+        for (offset, job) in config.jobs.enumerated() {
+            let label = "Lịch \(offset + 1)"
+            guard !job.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationMessage("\(label): thiếu mã lịch.")
+            }
+            guard !job.recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationMessage("\(label): thiếu người nhận.")
+            }
+            guard !job.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !job.images.isEmpty else {
+                throw ValidationMessage("\(label): cần tin nhắn hoặc ảnh/video.")
+            }
+
+            switch ScheduleType(rawValue: job.schedule.type) {
+            case .some(.daily):
+                guard Self.dailyTimeComponents(from: job.schedule.at) != nil else {
+                    throw ValidationMessage("\(label): giờ gửi hằng ngày không hợp lệ.")
+                }
+                let days = job.schedule.days ?? [0, 1, 2, 3, 4, 5, 6]
+                guard !days.isEmpty, days.allSatisfy({ (0...6).contains($0) }) else {
+                    throw ValidationMessage("\(label): ngày gửi phải nằm trong T2-CN.")
+                }
+            case .some(.once):
+                guard Self.onceDate(from: job.schedule.at) != nil else {
+                    throw ValidationMessage("\(label): ngày giờ gửi một lần không hợp lệ.")
+                }
+            case .none:
+                throw ValidationMessage("\(label): kiểu lịch không hỗ trợ.")
+            }
         }
     }
 
@@ -879,6 +1035,28 @@ final class LauncherModel: ObservableObject {
         } else {
             logText += "\n" + text
         }
+        appendLogFile(text)
+    }
+
+    private func appendLogFile(_ text: String) {
+        let logURL = dataRoot.appendingPathComponent("logs/scheduler.log")
+        let stampedLine = "\(Self.localTimestamp(Date())) \(text)\n"
+        guard let data = stampedLine.data(using: .utf8) else {
+            return
+        }
+
+        do {
+            try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fileManager.fileExists(atPath: logURL.path) {
+                fileManager.createFile(atPath: logURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: logURL)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            // Keep UI logging reliable even if the filesystem log cannot be updated.
+        }
     }
 
     static func onceDate(from value: String) -> Date? {
@@ -913,6 +1091,82 @@ final class LauncherModel: ObservableObject {
     static func formatDailyTime(_ date: Date) -> String {
         let components = Calendar.current.dateComponents([.hour, .minute], from: date)
         return String(format: "%02d:%02d", components.hour ?? 8, components.minute ?? 30)
+    }
+
+    private static func dueScheduledJob(for job: ScheduleJob, now: Date, state: JobExecutionState) -> DueScheduledJob? {
+        let type = ScheduleType(rawValue: job.schedule.type) ?? .daily
+
+        switch type {
+        case .once:
+            guard let dueAt = onceDate(from: job.schedule.at) else {
+                return nil
+            }
+            let occurrenceKey = localDateFormatter.string(from: dueAt)
+            if now >= dueAt && state.lastOccurrenceKey != occurrenceKey {
+                return DueScheduledJob(job: job, occurrenceKey: occurrenceKey)
+            }
+            return nil
+
+        case .daily:
+            guard let dailyTime = dailyTimeComponents(from: job.schedule.at) else {
+                return nil
+            }
+
+            let calendar = vietnamCalendar
+            let weekday = (calendar.component(.weekday, from: now) + 5) % 7
+            let allowedDays = job.schedule.days ?? [0, 1, 2, 3, 4, 5, 6]
+            guard allowedDays.contains(weekday) else {
+                return nil
+            }
+
+            var components = calendar.dateComponents([.year, .month, .day], from: now)
+            components.hour = dailyTime.hour
+            components.minute = dailyTime.minute
+            components.second = 0
+
+            guard let dueAt = calendar.date(from: components) else {
+                return nil
+            }
+
+            let occurrenceKey = localDateKeyFormatter.string(from: dueAt)
+            if now >= dueAt && state.lastOccurrenceKey != occurrenceKey {
+                return DueScheduledJob(job: job, occurrenceKey: occurrenceKey)
+            }
+            return nil
+        }
+    }
+
+    private static func dailyTimeComponents(from value: String) -> (hour: Int, minute: Int)? {
+        let parts = value.split(separator: ":")
+        guard
+            parts.count == 2,
+            let hour = Int(parts[0]),
+            let minute = Int(parts[1]),
+            (0...23).contains(hour),
+            (0...59).contains(minute)
+        else {
+            return nil
+        }
+        return (hour, minute)
+    }
+
+    private static func localTimestamp(_ date: Date) -> String {
+        localDateFormatter.string(from: date)
+    }
+
+    private static var vietnamCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "vi_VN")
+        calendar.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
+        return calendar
+    }
+
+    private static var localDateKeyFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
     }
 
     private static var localDateFormatter: DateFormatter {
@@ -1259,7 +1513,7 @@ struct ContentView: View {
                             Button {
                                 model.buildHelper()
                             } label: {
-                                Label("Build helper", systemImage: "hammer")
+                                Label("Kiểm tra app", systemImage: "checkmark.seal")
                             }
                         }
                         .disabled(model.currentTask != nil)
@@ -1606,7 +1860,7 @@ struct ContentView: View {
                     Button {
                         model.buildHelper()
                     } label: {
-                        Label("Build helper", systemImage: "hammer")
+                        Label("Kiểm tra app", systemImage: "checkmark.seal")
                     }
                 }
                 .disabled(model.currentTask != nil)

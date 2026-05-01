@@ -9,16 +9,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST_DIR = ROOT / "dist"
 APP_NAME = "ZaloSchedulerLauncher"
-APP_VERSION = "1.4.0"
-APP_BUILD = "7"
+APP_VERSION = "1.5.0"
+APP_BUILD = "8"
 APP_DIR = DIST_DIR / f"{APP_NAME}.app"
 CONTENTS_DIR = APP_DIR / "Contents"
 MACOS_DIR = CONTENTS_DIR / "MacOS"
 RESOURCES_DIR = CONTENTS_DIR / "Resources"
+TEMP_BUILD_DIR = DIST_DIR / "build"
 LAUNCHER_SRC = ROOT / "launcher" / "ZaloSchedulerLauncher.swift"
 HELPER_SRC = ROOT / "zalo_helper.swift"
 HELPER_MAIN_SRC = ROOT / "helper_main.swift"
 EXECUTABLE_PATH = MACOS_DIR / APP_NAME
+ARCH_TARGETS = [
+    ("arm64", "arm64-apple-macos13.0"),
+    ("x86_64", "x86_64-apple-macos13.0"),
+]
 
 
 def run(command: list[str]) -> None:
@@ -75,6 +80,32 @@ def copy_resources() -> None:
     shutil.copy2(ROOT / "config" / "jobs.example.json", resource_config_dir / "jobs.example.json")
 
 
+def build_universal_executable() -> None:
+    if TEMP_BUILD_DIR.exists():
+        shutil.rmtree(TEMP_BUILD_DIR)
+    TEMP_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+    binaries: list[Path] = []
+    for arch, target in ARCH_TARGETS:
+        output = TEMP_BUILD_DIR / f"{APP_NAME}-{arch}"
+        run(
+            [
+                "swiftc",
+                "-O",
+                "-parse-as-library",
+                "-target",
+                target,
+                "-o",
+                str(output),
+                str(LAUNCHER_SRC),
+                str(HELPER_SRC),
+            ]
+        )
+        binaries.append(output)
+
+    run(["lipo", "-create", "-output", str(EXECUTABLE_PATH), *map(str, binaries)])
+
+
 def build_app() -> Path:
     if APP_DIR.exists():
         shutil.rmtree(APP_DIR)
@@ -82,17 +113,7 @@ def build_app() -> Path:
     MACOS_DIR.mkdir(parents=True, exist_ok=True)
     RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
 
-    run(
-        [
-            "swiftc",
-            "-O",
-            "-parse-as-library",
-            "-o",
-            str(EXECUTABLE_PATH),
-            str(LAUNCHER_SRC),
-            str(HELPER_SRC),
-        ]
-    )
+    build_universal_executable()
     write_info_plist()
     copy_resources()
     EXECUTABLE_PATH.chmod(0o755)
